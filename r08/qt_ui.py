@@ -525,6 +525,9 @@ class QtApp:
         reset_view = QtWidgets.QPushButton("Reset view"); reset_view.clicked.connect(lambda: self._camera_preset("reset")); views.addWidget(reset_view)
         follow = QtWidgets.QCheckBox("Follow tool"); follow.toggled.connect(self._set_follow); views.addWidget(follow)
         trail = QtWidgets.QCheckBox("Trail"); trail.setChecked(True); trail.toggled.connect(self._set_trail); views.addWidget(trail)
+        self.gaussian_splats = QtWidgets.QCheckBox("Gaussian splat view")
+        self.gaussian_splats.setToolTip("Render the robot and mapped objects as soft camera-projected splats")
+        self.gaussian_splats.toggled.connect(self._mark_dirty); views.addWidget(self.gaussian_splats)
         self.log_view = QtWidgets.QTextEdit(); self.log_view.setReadOnly(True); self.log_view.setMaximumHeight(110); ll.addWidget(self.log_view)
         split.addWidget(left)
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setMinimumWidth(370); scroll.setMaximumWidth(470)
@@ -1315,7 +1318,7 @@ class QtApp:
         w, h = max(400, self.image_label.width()), max(300, self.image_label.height())
         info = self.robot_mesh.update(self.q_vis)
         hud = {"backend": self.renderer.name, "fps": self.fps, "gpu": self.gpu_usage,
-               "axes": self.show_axes.isChecked()}
+               "axes": self.show_axes.isChecked(), "gaussian_splats": self.gaussian_splats.isChecked()}
         if snap.pose is not None: hud["tip_text"] = "  ".join(fmt_pos(snap.pose[i]) for i in range(3)) + " in"
         else: hud["msg"] = "Open Setup to select the number table"
         ghost_tris = ghost_tip = None; ghost_ok = True; ghost_col = hex_rgb(C.green)

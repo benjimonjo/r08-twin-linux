@@ -442,8 +442,9 @@ class App:
         for k in range(3):
             mk_button(r, str(k + 1), lambda k=k: self.point_to_go(k), padx=6, pady=2, font=FONT_SM).pack(side="left", padx=1)
         self.show_objs, self.show_gizmo, self.show_axes = tk.BooleanVar(value=True), tk.BooleanVar(value=True), tk.BooleanVar(value=True)
+        self.gaussian_splats = tk.BooleanVar(value=False)
         for text, var in (("Show mapped objects", self.show_objs), ("Axis gizmo on the tool tip", self.show_gizmo),
-                          ("Show coordinate axes", self.show_axes)):
+                          ("Show coordinate axes", self.show_axes), ("Gaussian splat view", self.gaussian_splats)):
             tk.Checkbutton(body, text=text, variable=var, bg=C.card, fg=C.text, selectcolor=C.raised, activebackground=C.card,
                            activeforeground=C.text, font=FONT_SM, bd=0, highlightthickness=0, command=self._mark_dirty).pack(anchor="w", pady=(4, 0))
         r = tk.Frame(body, bg=C.card)
@@ -1279,7 +1280,7 @@ class App:
         if show_objs and self._obj_soup is not None:
             tris = tuple(np.concatenate([a, b]) for a, b in zip(tris, self._obj_soup))
         hud = {"fps": self.fps, "gpu": self.gpu_usage, "backend": self.renderer.name,
-               "axes": bool(self.show_axes.get())}
+               "axes": bool(self.show_axes.get()), "gaussian_splats": bool(self.gaussian_splats.get())}
         if snap.pose is not None:
             p = snap.pose
             hud["tip_text"] = f"{fmt_pos(p[0])}  {fmt_pos(p[1])}  {fmt_pos(p[2])} in"

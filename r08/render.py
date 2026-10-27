@@ -56,6 +56,82 @@ LFS = """#version 330
 in vec3 v_col; out vec4 f_col; void main(){ f_col = vec4(v_col,1.0); }
 """
 MAX_VERTS = 80000
+MAX_SPLATS = 120000
+
+SPLAT_VS = """#version 330
+uniform mat4 mvp; uniform float focal_px; uniform float splat_radius;
+uniform vec3 eye; uniform vec3 light;
+in vec3 in_pos; in vec3 in_nrm; in vec3 in_col;
+out vec3 v_col;
+void main(){
+  vec4 clip = mvp * vec4(in_pos, 1.0);
+  gl_Position = clip;
+  gl_PointSize = clamp(2.0 * splat_radius * focal_px / max(clip.w, 0.05), 2.0, 22.0);
+  vec3 n = normalize(in_nrm);
+  vec3 to_eye = normalize(eye - in_pos);
+  if (dot(n, to_eye) < 0.0) n = -n;
+  float lam = clamp(dot(n, light), 0.0, 1.0);
+  v_col = in_col * (0.30 + 0.70 * lam);
+}
+"""
+SPLAT_FS = """#version 330
+in vec3 v_col; out vec4 f_col;
+void main(){
+  vec2 p = 2.0 * gl_PointCoord - 1.0;
+  float r2 = dot(p, p);
+  if (r2 > 1.0) discard;
+  float a = 0.52 * exp(-4.0 * r2);
+  if (a < 0.015) discard;
+  f_col = vec4(v_col, a);
+}
+"""
+
+
+def _splat_samples(soup, max_points=MAX_SPLATS, spacing=0.045, tint=None):
+    """Sample triangle faces into colored surfel points for the splat view."""
+    pos, nrm, col = (np.asarray(part, dtype=np.float32).reshape(-1, 3, 3) for part in soup)
+    if not len(pos):
+        return np.empty((0, 9), np.float32)
+    edges = np.stack((pos[:, 1] - pos[:, 0], pos[:, 2] - pos[:, 1], pos[:, 0] - pos[:, 2]), axis=1)
+    levels = np.clip(np.ceil(np.linalg.norm(edges, axis=2).max(axis=1) / spacing).astype(int), 1, 9)
+    batches = []
+    for level in np.unique(levels):
+        indices = np.flatnonzero(levels == level)
+        bary = np.asarray([(1.0 - i / level - j / level, i / level, j / level)
+                           for i in range(level + 1) for j in range(level + 1 - i)], np.float32)
+        points = np.einsum("tvc,bv->tbc", pos[indices], bary)
+        normals = np.einsum("tvc,bv->tbc", nrm[indices], bary)
+        normals /= np.linalg.norm(normals, axis=2, keepdims=True) + 1e-8
+        colors = np.einsum("tvc,bv->tbc", col[indices], bary)
+        if tint is not None:
+            colors[:] = np.asarray(tint, np.float32)[None, None, :] / 255.0
+        batches.append(np.concatenate((points, normals, colors), axis=2).reshape(-1, 9))
+    result = np.concatenate(batches, axis=0)
+    if len(result) > max_points:
+        result = result[::int(math.ceil(len(result) / max_points))][:max_points]
+    return np.ascontiguousarray(result, dtype=np.float32)
+
+
+def _composite_splats(img, view, samples):
+    if not len(samples):
+        return img
+    pixels, depth = view.project(samples[:, :3])
+    good = (depth > 0.12) & (pixels[:, 0] > -20) & (pixels[:, 0] < img.shape[1] + 20) & \
+           (pixels[:, 1] > -20) & (pixels[:, 1] < img.shape[0] + 20)
+    indices = np.flatnonzero(good)
+    indices = indices[np.argsort(depth[indices])[::-1]]
+    layer = np.zeros_like(img)
+    alpha = np.zeros(img.shape[:2], np.uint8)
+    for i in indices:
+        x, y = np.rint(pixels[i]).astype(int)
+        radius = int(np.clip(0.016 * view.F / depth[i], 2, 10))
+        color = tuple(int(c) for c in np.clip(samples[i, 6:9] * 255, 0, 255))
+        cv2.circle(layer, (x, y), radius, color, -1, cv2.LINE_AA)
+        cv2.circle(alpha, (x, y), radius, 150, -1, cv2.LINE_AA)
+    sigma = 1.2
+    layer = cv2.GaussianBlur(layer, (0, 0), sigma)
+    alpha = cv2.GaussianBlur(alpha, (0, 0), sigma).astype(np.float32)[:, :, None] / 255.0
+    return np.clip(img.astype(np.float32) * (1.0 - alpha) + layer.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
 
 
 class GLBackend:
@@ -67,8 +143,11 @@ class GLBackend:
         self.ctx = moderngl.create_standalone_context()
         self.prog = self.ctx.program(vertex_shader=VS, fragment_shader=FS)
         self.lprog = self.ctx.program(vertex_shader=LVS, fragment_shader=LFS)
+        self.sprog = self.ctx.program(vertex_shader=SPLAT_VS, fragment_shader=SPLAT_FS)
         self.vbo = self.ctx.buffer(reserve=MAX_VERTS * 36, dynamic=True)
         self.vao = self.ctx.vertex_array(self.prog, [(self.vbo, "3f 3f 3f", "in_pos", "in_nrm", "in_col")])
+        self.svbo = self.ctx.buffer(reserve=MAX_SPLATS * 36, dynamic=True)
+        self.svao = self.ctx.vertex_array(self.sprog, [(self.svbo, "3f 3f 3f", "in_pos", "in_nrm", "in_col")])
         segs, cols = floor_lines(include_axes=False)
         data = np.hstack([segs.reshape(-1, 3), np.repeat(cols, 2, axis=0)]).astype("f4")
         self.lvbo = self.ctx.buffer(data.tobytes())
@@ -99,7 +178,7 @@ class GLBackend:
             self.fbo_ms = None
         self.size = (w, h)
 
-    def render_base(self, w, h, view, tris, ghost, ghost_col, show_axes=True):
+    def render_base(self, w, h, view, tris, ghost, ghost_col, show_axes=True, gaussian_splats=False):
         mgl, ctx = self.mgl, self.ctx
         self._ensure(w, h)
         target = self.fbo_ms or self.fbo
@@ -112,20 +191,37 @@ class GLBackend:
         self.lvao.render(mgl.LINES, vertices=self.nline)
         if show_axes:
             self.avao.render(mgl.LINES, vertices=self.naxis)
-        parts = [np.hstack(tris)]
-        n1 = len(parts[0])
-        if ghost is not None:
-            parts.append(np.hstack(ghost))
-        data = np.ascontiguousarray(np.vstack(parts), dtype="f4")[:MAX_VERTS]
-        self.vbo.write(data.tobytes())
-        self.prog["mvp"].write(mvp)
-        self.prog["eye"].value = tuple(float(x) for x in view.eye)
-        self.prog["light"].value = tuple(float(x) for x in view.light)
-        self.prog["alpha"].value = 1.0
-        self.prog["use_tint"].value = 0.0
-        self.prog["tint"].value = (0.0, 0.0, 0.0)
-        self.vao.render(mgl.TRIANGLES, vertices=min(n1, len(data)))
-        if ghost is not None and len(data) > n1:
+        if gaussian_splats:
+            parts = [_splat_samples(tris)]
+            if ghost is not None:
+                parts.append(_splat_samples(ghost, max_points=24000, tint=ghost_col))
+            data = np.vstack(parts)[:MAX_SPLATS]
+            if len(data):
+                self.svbo.write(data.tobytes())
+                self.sprog["mvp"].write(mvp)
+                self.sprog["eye"].value = tuple(float(x) for x in view.eye)
+                self.sprog["light"].value = tuple(float(x) for x in view.light)
+                self.sprog["focal_px"].value = float(view.F)
+                self.sprog["splat_radius"].value = 0.016
+                ctx.enable(mgl.BLEND)
+                ctx.blend_func = mgl.SRC_ALPHA, mgl.ONE_MINUS_SRC_ALPHA
+                self.svao.render(mgl.POINTS, vertices=len(data))
+                ctx.disable(mgl.BLEND)
+        else:
+            parts = [np.hstack(tris)]
+            n1 = len(parts[0])
+            if ghost is not None:
+                parts.append(np.hstack(ghost))
+            data = np.ascontiguousarray(np.vstack(parts), dtype="f4")[:MAX_VERTS]
+            self.vbo.write(data.tobytes())
+            self.prog["mvp"].write(mvp)
+            self.prog["eye"].value = tuple(float(x) for x in view.eye)
+            self.prog["light"].value = tuple(float(x) for x in view.light)
+            self.prog["alpha"].value = 1.0
+            self.prog["use_tint"].value = 0.0
+            self.prog["tint"].value = (0.0, 0.0, 0.0)
+            self.vao.render(mgl.TRIANGLES, vertices=min(n1, len(data)))
+        if not gaussian_splats and ghost is not None and len(data) > n1:
             ctx.enable(mgl.BLEND)
             ctx.blend_func = mgl.SRC_ALPHA, mgl.ONE_MINUS_SRC_ALPHA
             self.prog["alpha"].value = 0.45
@@ -189,19 +285,25 @@ class CPUBackend:
         for k, i in enumerate(idx.tolist()):
             cv2.fillConvexPoly(img, scr[i], tuple(fill[k]))
 
-    def render_base(self, w, h, view, tris, ghost, ghost_col, show_axes=True):
+    def render_base(self, w, h, view, tris, ghost, ghost_col, show_axes=True, gaussian_splats=False):
         img = self._background(w, h)
         for (a, b), c in zip(self._floor, self._floor_cols):
             view.seg(img, a, b, tuple(int(x * 255) for x in c), 1)
         if show_axes:
             for (a, b), c in zip(self._axes, self._axis_cols):
                 view.seg(img, a, b, tuple(int(x * 255) for x in c), 1)
-        self._paint(img, view, tris)
-        if ghost is not None:
-            layer = img.copy()
-            self._paint(layer, view, ghost, tint=ghost_col)
-            m = (layer != img).any(axis=2)
-            img[m] = (img[m] * 0.55 + layer[m] * 0.45).astype(np.uint8)
+        if gaussian_splats:
+            parts = [_splat_samples(tris, max_points=18000)]
+            if ghost is not None:
+                parts.append(_splat_samples(ghost, max_points=6000, tint=ghost_col))
+            img = _composite_splats(img, view, np.vstack(parts))
+        else:
+            self._paint(img, view, tris)
+            if ghost is not None:
+                layer = img.copy()
+                self._paint(layer, view, ghost, tint=ghost_col)
+                m = (layer != img).any(axis=2)
+                img[m] = (img[m] * 0.55 + layer[m] * 0.45).astype(np.uint8)
         return img
 
 
@@ -331,7 +433,8 @@ class Renderer:
         view = View(cam, w, h)
         hud = fr.hud or {}
         img = self.backend.render_base(w, h, view, fr.tris, fr.ghost_tris, fr.ghost_col,
-                                       bool(hud.get("axes", True)))
+                                       bool(hud.get("axes", True)),
+                                       bool(hud.get("gaussian_splats", False)))
         return draw_overlay(img, view, fr)
 
 
