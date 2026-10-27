@@ -16,7 +16,7 @@ import os, math, time, traceback
 import numpy as np
 import cv2
 import tkinter as tk
-from tkinter import simpledialog
+from tkinter import simpledialog, messagebox
 from PIL import Image, ImageTk
 
 from .common import (C, AXES, UNITS, MINUS, clock, wrap180, hex_rgb, Config, CONFIG_FILE, DIGIT_BANK_FILE, DEBUG_DIR,
@@ -26,6 +26,7 @@ from . import digits
 from .model3d import Camera, RobotMesh, plate_solid, pipe_solid, obj_summary
 from .render import make_renderer
 from .gpu_usage import GpuUsageMonitor
+from .object_points import parse_xyz_points
 from .screen_reader import Shared, OcrWorker, StepReader, IKWorker, split_cells, grab_gray
 from .planner import step_presses, jog_press, plan_presses, step_value, fmt_step, N_LEVELS
 from .guide import Guide
@@ -416,6 +417,9 @@ class App:
         mk_button(r, "New plate", lambda: self.start_teach("plate"), padx=10).pack(side="left")
         mk_button(r, "New hollow pipe", lambda: self.start_teach("pipe"), padx=10).pack(side="left", padx=6)
         mk_button(r, "Cancel", self.cancel_teach, padx=10).pack(side="left")
+        r = tk.Frame(body, bg=C.card)
+        r.pack(fill="x", pady=(6, 0))
+        mk_button(r, "Pole from points…", self.import_pole_from_points, padx=10).pack(side="left")
         self.teach_lbl = tk.Label(body, text="", bg=C.card, fg=C.yellow, font=FONT_SM, wraplength=340, justify="left", anchor="w")
         self.teach_lbl.pack(fill="x", pady=(6, 0))
         r = tk.Frame(body, bg=C.card)
@@ -968,6 +972,60 @@ class App:
         self.teach = {"type": kind, "pts": []}
         self._teach_msg()
         self._objs_dirty = self.dirty = True
+
+    def import_pole_from_points(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Pole from points")
+        dialog.transient(self.root)
+        dialog.geometry("560x330")
+        tk.Label(dialog, text=("Paste exactly two pole centerline points, one per line, as X Y Z in inches.\n"
+                               "Labeled panel read-outs or three bare numbers are accepted."),
+                 justify="left", anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+        text_box = tk.Text(dialog, height=10, wrap="none")
+        text_box.pack(fill="both", expand=True, padx=10, pady=4)
+        result = {"text": None}
+        actions = tk.Frame(dialog)
+        actions.pack(fill="x", padx=10, pady=(4, 10))
+
+        def accept():
+            result["text"] = text_box.get("1.0", "end-1c")
+            dialog.destroy()
+
+        tk.Button(actions, text="Import", command=accept).pack(side="right", padx=(6, 0))
+        tk.Button(actions, text="Cancel", command=dialog.destroy).pack(side="right")
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+        if result["text"] is None:
+            return
+        try:
+            points = parse_xyz_points(result["text"])
+        except ValueError as exc:
+            messagebox.showerror("Pole from points", f"{exc}\n\nUse X Y Z values, one point per line.", parent=self.root)
+            return
+        if len(points) != 2:
+            messagebox.showerror("Pole from points", f"Enter exactly two points; found {len(points)}.", parent=self.root)
+            return
+        if np.linalg.norm(np.asarray(points[1]) - np.asarray(points[0])) < 0.01:
+            messagebox.showerror("Pole from points", "The two endpoints must be different.", parent=self.root)
+            return
+        number = 1 + sum(obj.get("type") == "pipe" for obj in self.objects)
+        name = simpledialog.askstring("Pole name", "Name:", parent=self.root, initialvalue=f"Pole {number}")
+        if not name or not name.strip():
+            return
+        outer = simpledialog.askfloat("Pole outside diameter", "Outside diameter (in):", parent=self.root,
+                                      initialvalue=4.0, minvalue=0.1, maxvalue=60.0)
+        if outer is None:
+            return
+        inner = simpledialog.askfloat("Pole inside diameter", "Inside diameter (in; enter 0 for a solid pole):",
+                                      parent=self.root, initialvalue=min(3.0, outer - 0.01),
+                                      minvalue=0.0, maxvalue=max(0.0, outer - 0.01))
+        if inner is None:
+            return
+        item = {"type": "pipe", "name": name.strip(), "pts": points, "d": float(outer), "id": float(inner)}
+        self.objects.append(item)
+        self.sel_i = len(self.objects) - 1
+        self._save_objs()
+        self.log(f"Mapped {obj_summary(item)}", "ok")
 
     def cancel_teach(self):
         if self.teach:

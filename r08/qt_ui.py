@@ -30,6 +30,7 @@ from .planner import plan_presses, step_value
 from .wayland_input import WaylandPointer
 from .github_updater import check_for_updates, install_update
 from .gpu_usage import GpuUsageMonitor
+from .object_points import parse_xyz_points
 from types import SimpleNamespace
 
 
@@ -597,7 +598,9 @@ class QtApp:
         objrow = QtWidgets.QHBoxLayout(); ol.addLayout(objrow)
         for title, kind in (("New plate", "plate"), ("New hollow pipe", "pipe")):
             b = QtWidgets.QPushButton(title); b.clicked.connect(lambda checked=False, k=kind: self._start_teach(k)); objrow.addWidget(b)
-        points_plate = QtWidgets.QPushButton("Plate from points…"); points_plate.clicked.connect(self._add_plate_from_points); ol.addWidget(points_plate)
+        import_row = QtWidgets.QHBoxLayout(); ol.addLayout(import_row)
+        points_plate = QtWidgets.QPushButton("Plate from points…"); points_plate.clicked.connect(self._add_plate_from_points); import_row.addWidget(points_plate)
+        points_pole = QtWidgets.QPushButton("Pole from points…"); points_pole.clicked.connect(self._add_pole_from_points); import_row.addWidget(points_pole)
         self.teach_label = QtWidgets.QLabel("Map surfaces by positioning the tool tip and recording pose points."); self.teach_label.setWordWrap(True); ol.addWidget(self.teach_label)
         pointrow = QtWidgets.QHBoxLayout(); ol.addLayout(pointrow)
         add_point = QtWidgets.QPushButton("Set point"); add_point.clicked.connect(self._set_point); pointrow.addWidget(add_point)
@@ -693,23 +696,10 @@ class QtApp:
                   "3. Point 3: X +38.9  Y -46.3  Z -27.1 in")
         text, ok = QtWidgets.QInputDialog.getMultiLineText(self.window, "Plate from points", prompt)
         if not ok: return
-        import re
-        pts = []
-        for line in text.splitlines():
-            if not line.strip(): continue
-            if line.strip().lower().startswith("mapped "): continue
-            # Accept either three bare numbers or the labeled panel read-out format.
-            labeled = re.search(r"X\s*([+-]?\d+(?:\.\d+)?)\s+Y\s*([+-]?\d+(?:\.\d+)?)\s+Z\s*([+-]?\d+(?:\.\d+)?)", line, re.I)
-            if labeled:
-                pts.append([float(v) for v in labeled.groups()])
-                continue
-            nums = re.findall(r"[+-]?\d+(?:\.\d+)?", line)
-            # Strip a leading point index such as '1.' or 'Point 1'.
-            if len(nums) >= 4 and re.match(r"\s*\d+\s*[.)]", line): nums = nums[1:]
-            if len(nums) != 3:
-                QtWidgets.QMessageBox.warning(self.window, "Plate from points", f"Could not read this line:\n{line}\n\nUse X Y Z values, one point per line.")
-                return
-            pts.append([float(v) for v in nums])
+        try: pts = parse_xyz_points(text)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self.window, "Plate from points", f"{exc}\n\nUse X Y Z values, one point per line.")
+            return
         if len(pts) != 3:
             QtWidgets.QMessageBox.warning(self.window, "Plate from points", f"Enter exactly three points; found {len(pts)}.")
             return
@@ -728,6 +718,35 @@ class QtApp:
         self._refresh_objects(); self.object_list.setCurrentRow(len(self.objects) - 1); self.dirty = True
         self.teach_label.setText(f"Mapped {obj_summary(trial)}")
         self.log(f"Mapped {obj_summary(trial)}")
+
+    def _add_pole_from_points(self):
+        prompt = ("Enter exactly two pole centerline points, one per line, as X Y Z in inches.\n"
+                  "You can paste the labeled panel read-out format or three bare numbers per line.\n"
+                  "Example:\n1. X +59.0  Y +51.1  Z -28.2 in\n2. X +57.2  Y -52.1  Z -27.3 in")
+        text, ok = QtWidgets.QInputDialog.getMultiLineText(self.window, "Pole from points", prompt)
+        if not ok: return
+        try: pts = parse_xyz_points(text)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self.window, "Pole from points", f"{exc}\n\nUse X Y Z values, one point per line.")
+            return
+        if len(pts) != 2:
+            QtWidgets.QMessageBox.warning(self.window, "Pole from points", f"Enter exactly two points; found {len(pts)}.")
+            return
+        if np.linalg.norm(np.asarray(pts[1]) - np.asarray(pts[0])) < 0.01:
+            QtWidgets.QMessageBox.warning(self.window, "Pole from points", "The two endpoints must be different.")
+            return
+        number = 1 + sum(obj.get("type") == "pipe" for obj in self.objects)
+        name, ok = QtWidgets.QInputDialog.getText(self.window, "Pole name", "Name:", text=f"Pole {number}")
+        if not ok or not name.strip(): return
+        outer, ok = QtWidgets.QInputDialog.getDouble(self.window, "Pole outside diameter", "Outside diameter (in):", 4.0, 0.1, 60.0, 2)
+        if not ok: return
+        inner, ok = QtWidgets.QInputDialog.getDouble(self.window, "Pole inside diameter", "Inside diameter (in; enter 0 for a solid pole):", min(3.0, outer - 0.01), 0.0, max(0.0, outer - 0.01), 2)
+        if not ok: return
+        item = {"type": "pipe", "name": name.strip(), "pts": pts, "d": outer, "id": inner}
+        self.objects.append(item); self.cfg.set("objects", self.objects); self.cfg.save()
+        self._refresh_objects(); self.object_list.setCurrentRow(len(self.objects) - 1); self.dirty = True
+        self.teach_label.setText(f"Mapped {obj_summary(item)}")
+        self.log(f"Mapped {obj_summary(item)}")
 
     def _start_teach(self, kind):
         self.teach = {"type": kind, "pts": []}
