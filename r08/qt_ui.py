@@ -402,7 +402,9 @@ class QtApp:
         helpb = QtWidgets.QPushButton("Help"); helpb.clicked.connect(self._help); header.addWidget(helpb)
         settingsb = QtWidgets.QPushButton("Settings"); settingsb.clicked.connect(self._settings); header.addWidget(settingsb)
         self.update_button = QtWidgets.QPushButton("Check GitHub updates"); self.update_button.clicked.connect(self._update_button_clicked); header.addWidget(self.update_button)
-        reloadb = QtWidgets.QPushButton("Reload (dev)"); reloadb.clicked.connect(lambda: self._reload_application()); header.addWidget(reloadb)
+        reloadb = QtWidgets.QPushButton("Reload scripts (dev)")
+        reloadb.setToolTip("Save settings and restart R08 to load the current Python files")
+        reloadb.clicked.connect(lambda: self._reload_application()); header.addWidget(reloadb)
         split = QtWidgets.QSplitter(); root.addWidget(split, 1)
         left = QtWidgets.QWidget(); ll = QtWidgets.QVBoxLayout(left); ll.setContentsMargins(0, 0, 4, 0)
         self.image_label = SceneLabel("Open Setup to select the number table")
@@ -1042,14 +1044,26 @@ class QtApp:
         if self.automated_run or self.guide_next.isEnabled():
             QtWidgets.QMessageBox.warning(self.window, "Reload unavailable", "Stop the guided movement and make sure the robot is settled before reloading.")
             return
+        if self.update_worker and self.update_worker.isRunning():
+            QtWidgets.QMessageBox.warning(self.window, "Reload unavailable", "Wait for the GitHub update check or install to finish before reloading.")
+            return
         if confirm:
-            answer = QtWidgets.QMessageBox.question(self.window, "Reload development code", "Restart R08 from the current files?",
+            answer = QtWidgets.QMessageBox.question(self.window, "Reload development code", "Save settings and restart R08 from the current Python files?",
                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                 QtWidgets.QMessageBox.StandardButton.No)
             if answer != QtWidgets.QMessageBox.StandardButton.Yes: return
         try:
             self.cfg.set("settings", self.settings); self.cfg.save(); self.bank.save()
         except Exception: pass
+        if hasattr(self, "timer"): self.timer.stop()
+        if self.wayland_pointer:
+            try: self.wayland_pointer.close()
+            except Exception: pass
+            self.wayland_pointer = None
+        for worker in (self.ocr, self.step_reader, self.ik):
+            worker.stop()
+        for worker in (self.ocr, self.step_reader, self.ik):
+            worker.join(timeout=2)
         os.execv(sys.executable, [sys.executable, *sys.argv])
 
     def run_setup(self, keys):
