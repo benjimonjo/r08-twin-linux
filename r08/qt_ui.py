@@ -199,36 +199,76 @@ def detect_panel_buttons(capture):
                 found[label] = ([monitor["left"] + x + w / 2, monitor["top"] + y + h / 2], 100)
                 break
 
-    # Keep a full-screen text pass for green/red controls and themes without
-    # blue buttons. Multiple scales improve detection of compact panel labels.
-    scale = 2.5
-    enlarged = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    data = pytesseract.image_to_data(enlarged, config="--oem 3 --psm 11", output_type=pytesseract.Output.DICT, timeout=8)
-    lines = {}
-    for i, word in enumerate(data["text"]):
-        word = word.strip()
-        if not word: continue
-        try: confidence = float(data["conf"][i])
-        except (TypeError, ValueError): confidence = 0
-        if confidence < 8: continue
-        key = (data["page_num"][i], data["block_num"][i], data["par_num"][i], data["line_num"][i])
-        left, top, width, height = (int(data[k][i]) for k in ("left", "top", "width", "height"))
-        lines.setdefault(key, []).append((left, top, width, height, word, confidence))
+    # Find colored button bodies, including the green circular minus controls
+    # and red Step-/Abort controls. Their centers are better click targets than
+    # the nearby OCR text positions.
+    saturated = cv2.inRange(hsv, np.array([0, 95, 65], np.uint8), np.array([179, 255, 255], np.uint8))
+    saturated = cv2.morphologyEx(saturated, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    controls = []
+    contours, _ = cv2.findContours(saturated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        if area < 45 or w < 7 or h < 7 or w > 180 or h > 90:
+            continue
+        if w / max(h, 1) > 8 or h / max(w, 1) > 5:
+            continue
+        controls.append((x, y, w, h, x + w / 2, y + h / 2))
+
+    # Run OCR on both contrast-equalized grayscale and adaptive-thresholded
+    # images. The labels are tiny and white text can disappear in a plain
+    # grayscale pass, especially on blue and green fills.
+    scale = 3.0
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
+    adaptive = cv2.adaptiveThreshold(clahe, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                     cv2.THRESH_BINARY, 31, 7)
+    text_candidates = []
     normalize = lambda s: re.sub(r"[^a-z+\-]", "", s.lower().replace("−", "-").replace("–", "-"))
     labels = {normalize(name): name for name in NEEDED_BUTTONS}
-    for words in lines.values():
-        words.sort(key=lambda item: item[0])
-        for i in range(len(words)):
-            for count in (1, 2):
-                span = words[i:i + count]
-                if len(span) != count: continue
-                name = labels.get(normalize("".join(x[4] for x in span)))
-                if not name: continue
-                confidence = sum(x[5] for x in span) / count
-                left = min(x[0] for x in span); top = min(x[1] for x in span)
-                right = max(x[0] + x[2] for x in span); bottom = max(x[1] + x[3] for x in span)
-                point = [monitor["left"] + (left + right) / (2 * scale), monitor["top"] + (top + bottom) / (2 * scale)]
-                if name not in found or confidence > found[name][1]: found[name] = (point, confidence)
+    for source in (clahe, adaptive):
+        enlarged = cv2.resize(source, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        data = pytesseract.image_to_data(enlarged, config="--oem 3 --psm 11",
+                                         output_type=pytesseract.Output.DICT, timeout=8)
+        lines = {}
+        for i, word in enumerate(data["text"]):
+            word = word.strip()
+            if not word: continue
+            try: confidence = float(data["conf"][i])
+            except (TypeError, ValueError): confidence = 0
+            if confidence < 4: continue
+            key = (data["page_num"][i], data["block_num"][i], data["par_num"][i], data["line_num"][i])
+            left, top, width, height = (int(data[k][i]) for k in ("left", "top", "width", "height"))
+            lines.setdefault(key, []).append((left, top, width, height, word, confidence))
+        for words in lines.values():
+            words.sort(key=lambda item: item[0])
+            for i in range(len(words)):
+                for count in (1, 2, 3):
+                    span = words[i:i + count]
+                    if len(span) != count: continue
+                    name = labels.get(normalize("".join(x[4] for x in span)))
+                    if not name: continue
+                    confidence = sum(x[5] for x in span) / count
+                    left = min(x[0] for x in span); top = min(x[1] for x in span)
+                    right = max(x[0] + x[2] for x in span); bottom = max(x[1] + x[3] for x in span)
+                    cx, cy = (left + right) / (2 * scale), (top + bottom) / (2 * scale)
+                    text_candidates.append((name, confidence, cx, cy))
+
+    for name, confidence, cx, cy in text_candidates:
+        nearby = []
+        for x, y, w, h, bx, by in controls:
+            # Distance to the colored body, zero when the label overlaps it.
+            dx = max(x - cx, 0, cx - (x + w))
+            dy = max(y - cy, 0, cy - (y + h))
+            distance = math.hypot(dx, dy)
+            if distance <= 55:
+                nearby.append((distance, bx, by))
+        if nearby:
+            _, bx, by = min(nearby)
+            point = [monitor["left"] + bx, monitor["top"] + by]
+        else:
+            point = [monitor["left"] + cx, monitor["top"] + cy]
+        # Prefer the color-crop result (confidence 100) when available.
+        if name not in found or confidence > found[name][1]: found[name] = (point, confidence)
     return monitor, image, {name: value[0] for name, value in found.items()}
 
 
