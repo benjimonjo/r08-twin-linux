@@ -4,7 +4,7 @@
     "cursor_speed": 2400.0,
     "settle": 0.8,
     "motion_wait": 4.0,
-    "click_tol": 34,
+    "click_tol": 34.0,
     "pos_tol": 0.15,
     "ang_tol": 1.0,
     "verify_each": true,
@@ -119,6 +119,6 @@
       "t": 0.5
     }
   ],
-  "click_interval": 2.0,
+  "click_interval": 3.0,
   "auto_input": false
 }
