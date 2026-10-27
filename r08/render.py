@@ -296,6 +296,9 @@ def draw_overlay(img, v, fr):
     foot = []
     if hud.get("fps") is not None:
         foot.append(f"{hud['fps']:.0f} fps")
+    if "gpu" in hud:
+        usage = hud["gpu"]
+        foot.append(f"GPU {usage:.0f}%" if usage is not None else "GPU n/a")
     if hud.get("backend"):
         foot.append(hud["backend"])
     if foot:

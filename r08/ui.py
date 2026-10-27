@@ -25,6 +25,7 @@ from . import kinematics as K
 from . import digits
 from .model3d import Camera, RobotMesh, plate_solid, pipe_solid, obj_summary
 from .render import make_renderer
+from .gpu_usage import GpuUsageMonitor
 from .screen_reader import Shared, OcrWorker, StepReader, IKWorker, split_cells, grab_gray
 from .planner import step_presses, jog_press, plan_presses, step_value, fmt_step, N_LEVELS
 from .guide import Guide
@@ -75,6 +76,8 @@ class App:
         self.abort_pending, self.abort_t = False, 0.0
 
         self.renderer, note = make_renderer(bool(self.settings.get("gpu", True)))
+        self.gpu_monitor = GpuUsageMonitor(); self.gpu_monitor.start()
+        self.gpu_usage = None
         self.robot_mesh, self.ghost_mesh, self.cam = RobotMesh(), RobotMesh(), Camera()
         self.q_vis = np.radians([0.0, 35.0, 25.0, 0.0, 40.0, 0.0])
         self.q_target = self.q_vis.copy()
@@ -1132,6 +1135,10 @@ class App:
     def _tick(self, now):
         dt = min(0.1, now - self.last_tick)
         self.last_tick = now
+        usage = self.gpu_monitor.latest
+        if usage != self.gpu_usage:
+            self.gpu_usage = usage
+            self.dirty = True
         if self.setup_open:
             return
         was_active = self.guide.active
@@ -1209,7 +1216,7 @@ class App:
         show_objs = bool(self.show_objs.get())
         if show_objs and self._obj_soup is not None:
             tris = tuple(np.concatenate([a, b]) for a, b in zip(tris, self._obj_soup))
-        hud = {"fps": self.fps, "backend": self.renderer.name}
+        hud = {"fps": self.fps, "gpu": self.gpu_usage, "backend": self.renderer.name}
         if snap.pose is not None:
             p = snap.pose
             hud["tip_text"] = f"{fmt_pos(p[0])}  {fmt_pos(p[1])}  {fmt_pos(p[2])} in"
@@ -1241,6 +1248,8 @@ class App:
 
     # ------------------------------------------------------------------ shutdown
     def shutdown(self):
+        self.gpu_monitor.stop()
+        self.gpu_monitor.join(timeout=2)
         try:
             self.cfg.set("window", self.root.geometry().split("+")[0])
             self.cfg.set("settings", self.settings)

@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 20045)
-Total output lines: 1336
-
 """Native Qt UI used on Linux Wayland sessions.
 
 The Tk UI remains the cross-platform desktop implementation. Tk on Unix is
@@ -32,6 +29,7 @@ from .widgets import NEEDED_BUTTONS, SETTING_DEFS, fmt_pos, fmt_ang
 from .planner import plan_presses, step_value
 from .wayland_input import WaylandPointer
 from .github_updater import check_for_updates, install_update
+from .gpu_usage import GpuUsageMonitor
 from types import SimpleNamespace
 
 
@@ -482,6 +480,9 @@ class QtApp:
         self.auto_next_allowed = 0.0; self.auto_verify_deadline = 0.0
         self.update_worker = None
         self.image_label = None; self.last_tick = clock(); self.log_entries = []
+        self.fps = 0.0; self._fps_count = 0; self._fps_time = clock()
+        self.gpu_monitor = GpuUsageMonitor(); self.gpu_monitor.start()
+        self.gpu_usage = None
         self._build()
         self._refresh()
         self.window.closeEvent = self._close_event
@@ -658,7 +659,9 @@ class QtApp:
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject); form.addRow(buttons)
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            for key,…45 tokens truncated…gs", self.settings); self.cfg.save()
+            for key, spin in controls.items(): self.settings[key] = spin.value()
+            for key, check in toggles.items(): self.settings[key] = check.isChecked()
+            self.cfg.set("settings", self.settings); self.cfg.save()
 
     def _save_ocr_snapshot(self):
         if not self.cfg.get("region"):
@@ -1249,6 +1252,9 @@ class QtApp:
 
     def _tick(self):
         now = clock(); dt = min(0.1, now - self.last_tick); self.last_tick = now
+        usage = self.gpu_monitor.latest
+        if usage != self.gpu_usage:
+            self.gpu_usage = usage; self.dirty = True
         snap = self.shared.snapshot()
         self.read_state.setText(f"● Reading {snap.scan_rate:.0f}/s" if snap.state == "Live" else f"○ {snap.state}")
         self.raw_label.setText(snap.raw or "Waiting for the number table…")
@@ -1288,7 +1294,7 @@ class QtApp:
     def _render(self, snap):
         w, h = max(400, self.image_label.width()), max(300, self.image_label.height())
         info = self.robot_mesh.update(self.q_vis)
-        hud = {"backend": self.renderer.name}
+        hud = {"backend": self.renderer.name, "fps": self.fps, "gpu": self.gpu_usage}
         if snap.pose is not None: hud["tip_text"] = "  ".join(fmt_pos(snap.pose[i]) for i in range(3)) + " in"
         else: hud["msg"] = "Open Setup to select the number table"
         ghost_tris = ghost_tip = None; ghost_ok = True; ghost_col = hex_rgb(C.green)
@@ -1315,6 +1321,11 @@ class QtApp:
                                 ghost_ok=ghost_ok, tip=info.tip, trail=np.asarray(self.trail) if self.show_trail and self.trail else None,
                                 labels=labels, gizmo=self.show_gizmo.isChecked(), hud=hud)
         rgb = self.renderer.render(w, h, self.cam, frame)
+        self._fps_count += 1
+        elapsed = clock() - self._fps_time
+        if elapsed >= 1.0:
+            self.fps = self._fps_count / elapsed
+            self._fps_count = 0; self._fps_time = clock()
         qimg = QtGui.QImage(rgb.data, w, h, 3 * w, QtGui.QImage.Format.Format_RGB888).copy()
         self.image_label.setPixmap(QtGui.QPixmap.fromImage(qimg))
 
@@ -1326,6 +1337,7 @@ class QtApp:
             self.cfg.set("settings", self.settings); self.cfg.save(); self.bank.save()
         except Exception: pass
         self.ocr.stop(); self.step_reader.stop(); self.ik.stop()
+        self.gpu_monitor.stop(); self.gpu_monitor.join(timeout=2)
         event.accept()
 
     def run(self):
