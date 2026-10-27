@@ -116,7 +116,10 @@ class App:
         self.root.after(30, self.tick)
 
     def run(self):
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            self.shutdown()
 
     # ------------------------------------------------------------------ env API used by Guide
     def log(self, msg, tag="info"):

@@ -1362,7 +1362,11 @@ class QtApp:
         event.accept()
 
     def run(self):
-        return self.qt.exec()
+        try:
+            return self.qt.exec()
+        except KeyboardInterrupt:
+            self.window.close()
+            return 130
 
 
 def main():

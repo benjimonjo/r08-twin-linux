@@ -26,4 +26,7 @@ except Exception:
     sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt received; exiting R08.")
