@@ -26,7 +26,7 @@ STAGE_DEFS = {   # key: (kind, title, hint, optional, short label)
     "status": ("rect", "Drag a box around the coloured IDLE / MOVING banner",
                "Optional. Lets me see exactly when the robot has stopped.  Esc skips this.", True, "banner"),
     "step_label": ("rect", "Drag a box around the \u2018Step size: \u2026\u2019 text",
-                   "Optional. Lets me read the panel\u2019s real step size (needs Tesseract).  Esc skips this.", True, "step text"),
+                   "Required for continuous panel step-size reading (needs Tesseract).  Esc cancels setup.", False, "step text"),
 }
 BUTTON_KEYS = ["pos_tl", "pos_br", "ang_tl", "ang_br", "step_plus", "step_minus", "abort", "review"]
 ALL_KEYS = ["region"] + BUTTON_KEYS + ["status", "step_label"]

@@ -5,7 +5,8 @@ inputs.py - everything that touches the real mouse / keyboard / overlay windows.
     Clicks    global left-click listener (pynput) -> queue of (time, x, y)
     Hotkeys   global Esc (stop) / F9 (pointer to target) / F10 (park on Abort)
     Beacon    click-through ring + label drawn over the button the user should click
-Without pynput the viewer still works; guided controls are disabled (HAVE_PYNPUT False).
+Wayland global hooks remain disabled. Its native UI may request pointer access
+from the XDG RemoteDesktop portal when the user explicitly enables automation.
 """
 import os, sys, math, time, queue, threading, ctypes
 import tkinter as tk

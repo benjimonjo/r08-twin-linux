@@ -10,7 +10,7 @@ screen_reader.py - background threads that feed the UI.
 
 Thread rules: workers only write Shared (under sh.lock) ; the UI thread only calls sh.snapshot().
 """
-import re, threading, traceback
+import re, threading, traceback, os, shutil
 from types import SimpleNamespace
 import numpy as np
 import cv2
@@ -43,6 +43,7 @@ class Shared:
         self.scan_rate = self.ocr_rate = 0.0
         self.busy, self.last_moving_t = None, -1e9      # busy: True MOVING / False IDLE / None unknown
         self.step_level, self.step_t = None, 0.0
+        self.step_status = "Step-size region not configured"
         self.ik = {}                                    # "live" / "ghost" -> SimpleNamespace(q, pe, re, pose, t)
         self.nrej, self.last_rej = 0, None
         self._cand, self._candn, self._t_acc = None, 0, clock()
@@ -53,7 +54,8 @@ class Shared:
                 pose=None if self.pose is None else self.pose.copy(), seq=self.seq, t_change=self.t_change,
                 t_read=self.t_read, state=self.state, raw=self.raw, scan_rate=self.scan_rate, ocr_rate=self.ocr_rate,
                 busy=self.busy, last_moving_t=self.last_moving_t, step_level=self.step_level, step_t=self.step_t,
-                has_status=self.status_region is not None, has_step=self.step_region is not None)
+                has_status=self.status_region is not None, has_step=self.step_region is not None,
+                step_status=self.step_status)
 
     def set_regions(self, region=None, status=None, step=None, keep=False):
         with self.lock:
@@ -62,6 +64,9 @@ class Shared:
             if not keep or status is not None:
                 self.status_region = status
             if not keep or step is not None:
+                if step != self.step_region:
+                    self.step_level, self.step_t = None, 0.0
+                    self.step_status = "Reading step-size region" if step else "Step-size region not configured"
                 self.step_region = step
 
     def offer_pose(self, v):
@@ -202,7 +207,7 @@ class OcrWorker(threading.Thread):
         sh = self.sh
         sct = new_mss()
         cells = [CellState() for _ in range(6)]
-        last_region, step_sig, step_last = None, None, 0.0
+        last_region = None
         scans = calls = 0
         rate_t = clock()
         while not self.stop_evt.is_set():
@@ -250,24 +255,6 @@ class OcrWorker(threading.Thread):
                 else:
                     with sh.lock:
                         sh.t_read, sh.state = now, "Live"
-            if preg is not None and HAVE_TESS and now - step_last > 0.5:        # optional 'Step size' text (Tesseract)
-                step_last = now
-                try:
-                    g = cv2.cvtColor(np.asarray(sct.grab(preg)), cv2.COLOR_BGRA2GRAY)
-                    _, b = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    if step_sig is None or step_sig.shape != b.shape or np.count_nonzero(step_sig != b) > 0.01 * b.size or sh.step_level is None:
-                        step_sig = b
-                        g3 = cv2.resize(g, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-                        _, b3 = cv2.threshold(g3, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                        if b3.mean() < 127:
-                            b3 = 255 - b3
-                        b3 = cv2.copyMakeBorder(b3, 20, 20, 30, 30, cv2.BORDER_CONSTANT, value=255)
-                        lv = parse_step_level(pytesseract.image_to_string(b3, config="--oem 3 --psm 7", timeout=2.0))
-                        if lv is not None:
-                            with sh.lock:
-                                sh.step_level, sh.step_t = lv, clock()
-                except Exception:
-                    pass
             scans += 1
             if now - rate_t >= 1.0:
                 with sh.lock:
@@ -277,6 +264,64 @@ class OcrWorker(threading.Thread):
             delay = 1.0 / max(1.0, float(self.settings.get("ocr_fps", 15))) - (clock() - t0)
             if delay > 0:
                 self.stop_evt.wait(delay)
+
+
+class StepReader(threading.Thread):
+    """Read the optional panel step-size text continuously, separate from pose OCR."""
+    def __init__(self, shared):
+        super().__init__(daemon=True, name="step-ocr")
+        self.sh = shared
+        self.stop_evt = threading.Event()
+
+    def stop(self):
+        self.stop_evt.set()
+
+    def run(self):
+        sh = self.sh
+        if not HAVE_TESS:
+            with sh.lock: sh.step_status = "Install pytesseract and the Tesseract executable to read panel step size"
+            return
+        cmd = getattr(getattr(pytesseract, "pytesseract", None), "tesseract_cmd", "tesseract")
+        if not (os.path.isfile(cmd) or shutil.which(cmd)):
+            with sh.lock: sh.step_status = "Tesseract executable not found; panel step size is not being read"
+            return
+        try:
+            sct = new_mss()
+        except Exception as exc:
+            with sh.lock: sh.step_status = f"Step-size capture unavailable: {exc}"
+            return
+        while not self.stop_evt.is_set():
+            with sh.lock: region = sh.step_region
+            if region is None:
+                with sh.lock:
+                    sh.step_level, sh.step_t = None, 0.0
+                    sh.step_status = "Step-size region not configured"
+                self.stop_evt.wait(0.4)
+                continue
+            try:
+                gray = cv2.cvtColor(np.asarray(sct.grab(region)), cv2.COLOR_BGRA2GRAY)
+                enlarged = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+                _, binary = cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                if binary.mean() < 127: binary = 255 - binary
+                binary = cv2.copyMakeBorder(binary, 20, 20, 30, 30, cv2.BORDER_CONSTANT, value=255)
+                text = pytesseract.image_to_string(binary, config="--oem 3 --psm 7", timeout=0.75)
+                level = parse_step_level(text)
+                with sh.lock:
+                    if level is not None:
+                        sh.step_level, sh.step_t = level, clock()
+                        sh.step_status = "Step-size OCR current"
+                    elif sh.step_t and clock() - sh.step_t > 3.0:
+                        sh.step_level = None
+                        sh.step_status = "Step-size OCR running; no current match"
+                    elif sh.step_t:
+                        sh.step_status = "Step-size OCR running; keeping recent match"
+                    else:
+                        sh.step_status = "Step-size OCR running; waiting for a match"
+            except Exception as exc:
+                with sh.lock:
+                    if sh.step_t and clock() - sh.step_t > 3.0: sh.step_level = None
+                    sh.step_status = f"Step-size OCR error: {exc}"
+            self.stop_evt.wait(0.5)
 
 
 # ------------------------------------------------------------------ IK worker

@@ -25,7 +25,7 @@ from . import kinematics as K
 from . import digits
 from .model3d import Camera, RobotMesh, plate_solid, pipe_solid, obj_summary
 from .render import make_renderer
-from .screen_reader import Shared, OcrWorker, IKWorker, split_cells, grab_gray
+from .screen_reader import Shared, OcrWorker, StepReader, IKWorker, split_cells, grab_gray
 from .planner import step_presses, jog_press, plan_presses, step_value, fmt_step, N_LEVELS
 from .guide import Guide
 from .inputs import HAVE_PYNPUT, WAYLAND_SESSION, LINUX_NO_PYNPUT, Cursor, Clicks, Hotkeys, Beacon, dark_titlebar
@@ -65,6 +65,8 @@ class App:
         self.ik.start()
         self.ocr = OcrWorker(self.shared, self.settings, self.ik, self.bank)
         self.ocr.start()
+        self.step_reader = StepReader(self.shared)
+        self.step_reader.start()
         self.cursor = Cursor(self.settings)
         self.clicks = Clicks()
         self.hot = Hotkeys()
@@ -605,8 +607,17 @@ class App:
             sel = i == self.ui_level
             restyle(b, C.yellow if sel else C.raised, "#ffd75a" if sel else C.hover, "#15130a" if sel else C.text)
             b.config(highlightbackground=C.blue if i == self.panel_level else C.card)
+        snap = self.shared.snapshot()
+        if snap.has_step:
+            if snap.step_level is None:
+                note = f"Panel step unknown \u00b7 {snap.step_status}"
+            else:
+                age = max(0.0, clock() - snap.step_t)
+                note = f"Panel is at {fmt_step(snap.step_level)} (OCR, {age:.1f}s ago)"
+        else:
+            note = f"Panel is at {fmt_step(self.panel_level)} (set up step-size OCR to read it)"
         extra = "" if self.ui_level == self.panel_level else f"  \u2013  will press Step {abs(self.ui_level - self.panel_level)}\u00d7 first"
-        self.level_note.config(text=f"Panel is at {fmt_step(self.panel_level)} (blue outline){extra}")
+        self.level_note.config(text=note + extra)
 
     # ------------------------------------------------------------------ target editing + Go
     def _can_start(self):
@@ -1232,7 +1243,7 @@ class App:
         except Exception:
             pass
         self.cursor.stop()
-        for part in (self.ocr, self.ik, self.clicks, self.hot):
+        for part in (self.ocr, self.step_reader, self.ik, self.clicks, self.hot):
             try:
                 part.stop()
             except Exception:

@@ -13,12 +13,21 @@ PyGObject, libportal's Xdp introspection data, GStreamer, and the GStreamer
 PipeWire plugin. Plasma will ask you to choose a screen and grant access. The
 Wayland UI uses PySide6/Qt; install your distribution's Qt Wayland platform
 plugin if the Qt wheel does not include it. This native frontend currently
-supports the live viewer, screen setup, and digit teaching; guided global
-pointer automation remains unavailable on Wayland.
+uses the live viewer, screen setup, movement planning, object mapping, and digit
+teaching. Guided movement can be performed manually. Optional automated panel
+input uses the XDG RemoteDesktop portal: enable it in Movement options, set up
+the panel button positions, then approve KDE's pointer permission prompt for
+each run. The click interval is configurable; automation pauses if the screen
+reader cannot verify an action. Install the KDE portal backend (`xdg-desktop-portal-kde`)
+and libportal Xdp introspection bindings for your distribution.
+Full setup now asks for the panel's step-size text region. The step OCR worker
+reads it continuously (about twice per second) and syncs the selected jog size.
+Install `pytesseract` and the Tesseract system executable for that feature and
+for automatic panel-button recognition; manual button setup remains available.
 On X11, Windows, and macOS the app continues to use `mss` directly.
 * Put this folder where your old `r08_config.json` is (or copy that file in) – your setup carries over.
 * `moderngl` = smooth GPU 3D. Without it the app still works using a slower CPU renderer (it tells you in the log).
-* Tesseract is **no longer needed** for the numbers. (Only the optional "Step size" text uses it.)
+* Tesseract is **not needed** for the six position numbers. It is used for continuous step-size reading and optional button-label recognition.
 
 ## What changed vs v2
 | Problem | Fix |
