@@ -1,0 +1,327 @@
+"""
+render.py - turns a Frame (triangle soups + overlay data) into an RGB image.
+
+    make_renderer(prefer_gpu) -> Renderer      (GPU via moderngl if installed + working, else CPU)
+    Renderer.render(w, h, cam, frame) -> uint8 RGB (h, w, 3)
+
+Two backends draw the SAME inputs:
+    GLBackend   OpenGL offscreen (moderngl standalone context), 4x MSAA, depth buffer.  Fast, no clipping artefacts.
+    CPUBackend  OpenCV painter's algorithm (triangles sorted far->near).  Slower, tiny artefacts, no dependencies.
+Then draw_overlay() paints 2D things on top with OpenCV (trail, tip marker, axis gizmo, labels, HUD text).
+
+Frame fields (SimpleNamespace, built in ui.App._render):
+    tris         (pos, nrm, col) soup of robot + mapped objects          (N,3) float32 each
+    ghost_tris   same, or None        ghost_col (r,g,b 0..255)          ghost_tip (3,) or None / ghost_ok
+    tip (3,)     trail (M,3) or None  labels [(P, text, rgb, dot)]      gizmo bool
+    hud dict     keys: tip_text, ghost_text, msg, fps, backend
+"""
+import math
+import numpy as np
+import cv2
+from .common import C, hex_rgb
+from .model3d import View, Camera, floor_lines
+
+BG_TOP, BG_BOT = np.array(hex_rgb(C.view_top), float), np.array(hex_rgb(C.view_bot), float)
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+AXIS_NAMES = ["X", "Y", "Z", "Xa", "Ya", "Za"]
+
+# ------------------------------------------------------------------ GPU backend
+VS = """#version 330
+uniform mat4 mvp;
+in vec3 in_pos; in vec3 in_nrm; in vec3 in_col;
+out vec3 v_pos; out vec3 v_nrm; out vec3 v_col;
+void main(){ v_pos=in_pos; v_nrm=in_nrm; v_col=in_col; gl_Position = mvp*vec4(in_pos,1.0); }
+"""
+FS = """#version 330
+uniform vec3 eye; uniform vec3 light; uniform float alpha; uniform vec3 tint; uniform float use_tint;
+in vec3 v_pos; in vec3 v_nrm; in vec3 v_col;
+out vec4 f_col;
+void main(){
+  vec3 n = normalize(v_nrm);
+  vec3 te = normalize(eye - v_pos);
+  if (dot(n, te) < 0.0) n = -n;
+  float lam = clamp(dot(n, light), 0.0, 1.0);
+  vec3 hv = normalize(light + te);
+  float spec = pow(clamp(dot(n, hv), 0.0, 1.0), 26.0) * 0.22;
+  float shade = 0.24 + 0.74*lam + 0.16*(0.5 + 0.5*n.z);
+  vec3 base = mix(v_col, tint, use_tint);
+  f_col = vec4(base*shade + vec3(spec), alpha);
+}
+"""
+LVS = """#version 330
+uniform mat4 mvp; in vec3 in_pos; in vec3 in_col; out vec3 v_col;
+void main(){ v_col=in_col; gl_Position = mvp*vec4(in_pos,1.0); }
+"""
+LFS = """#version 330
+in vec3 v_col; out vec4 f_col; void main(){ f_col = vec4(v_col,1.0); }
+"""
+MAX_VERTS = 80000
+
+
+class GLBackend:
+    name = "GPU (OpenGL)"
+
+    def __init__(self):
+        import moderngl
+        self.mgl = moderngl
+        self.ctx = moderngl.create_standalone_context()
+        self.prog = self.ctx.program(vertex_shader=VS, fragment_shader=FS)
+        self.lprog = self.ctx.program(vertex_shader=LVS, fragment_shader=LFS)
+        self.vbo = self.ctx.buffer(reserve=MAX_VERTS * 36, dynamic=True)
+        self.vao = self.ctx.vertex_array(self.prog, [(self.vbo, "3f 3f 3f", "in_pos", "in_nrm", "in_col")])
+        segs, cols = floor_lines()
+        data = np.hstack([segs.reshape(-1, 3), np.repeat(cols, 2, axis=0)]).astype("f4")
+        self.lvbo = self.ctx.buffer(data.tobytes())
+        self.lvao = self.ctx.vertex_array(self.lprog, [(self.lvbo, "3f 3f", "in_pos", "in_col")])
+        self.nline = len(data)
+        self.size, self.fbo, self.fbo_ms = None, None, None
+        self._ensure(64, 64)                       # fail early (inside make_renderer) if the driver can't do it
+        self.render_base(64, 64, View(Camera(), 64, 64),
+                         (np.zeros((3, 3), "f4"), np.ones((3, 3), "f4"), np.ones((3, 3), "f4")), None, (0, 255, 0))
+
+    def _ensure(self, w, h):
+        if self.size == (w, h):
+            return
+        for f in (self.fbo, self.fbo_ms):
+            if f is not None:
+                f.release()
+        ctx = self.ctx
+        self.fbo = ctx.framebuffer(ctx.renderbuffer((w, h)), ctx.depth_renderbuffer((w, h)))
+        try:
+            self.fbo_ms = ctx.framebuffer(ctx.renderbuffer((w, h), samples=4), ctx.depth_renderbuffer((w, h), samples=4))
+        except Exception:
+            self.fbo_ms = None
+        self.size = (w, h)
+
+    def render_base(self, w, h, view, tris, ghost, ghost_col):
+        mgl, ctx = self.mgl, self.ctx
+        self._ensure(w, h)
+        target = self.fbo_ms or self.fbo
+        target.use()
+        target.clear(BG_BOT[0] / 255 * 1.2, BG_BOT[1] / 255 * 1.2, BG_BOT[2] / 255 * 1.3, 1.0)
+        ctx.enable(mgl.DEPTH_TEST)
+        ctx.disable(mgl.BLEND)
+        mvp = view.mvp().T.astype("f4").tobytes()
+        self.lprog["mvp"].write(mvp)
+        self.lvao.render(mgl.LINES, vertices=self.nline)
+        parts = [np.hstack(tris)]
+        n1 = len(parts[0])
+        if ghost is not None:
+            parts.append(np.hstack(ghost))
+        data = np.ascontiguousarray(np.vstack(parts), dtype="f4")[:MAX_VERTS]
+        self.vbo.write(data.tobytes())
+        self.prog["mvp"].write(mvp)
+        self.prog["eye"].value = tuple(float(x) for x in view.eye)
+        self.prog["light"].value = tuple(float(x) for x in view.light)
+        self.prog["alpha"].value = 1.0
+        self.prog["use_tint"].value = 0.0
+        self.prog["tint"].value = (0.0, 0.0, 0.0)
+        self.vao.render(mgl.TRIANGLES, vertices=min(n1, len(data)))
+        if ghost is not None and len(data) > n1:
+            ctx.enable(mgl.BLEND)
+            ctx.blend_func = mgl.SRC_ALPHA, mgl.ONE_MINUS_SRC_ALPHA
+            self.prog["alpha"].value = 0.45
+            self.prog["use_tint"].value = 1.0
+            self.prog["tint"].value = tuple(c / 255.0 for c in ghost_col)
+            self.vao.render(mgl.TRIANGLES, vertices=len(data) - n1, first=n1)
+            ctx.disable(mgl.BLEND)
+        if self.fbo_ms is not None:
+            ctx.copy_framebuffer(self.fbo, self.fbo_ms)
+        raw = self.fbo.read(components=3, alignment=1)
+        return np.ascontiguousarray(np.frombuffer(raw, np.uint8).reshape(h, w, 3)[::-1])
+
+
+# ------------------------------------------------------------------ CPU backend
+class CPUBackend:
+    name = "CPU (OpenCV)"
+
+    def __init__(self):
+        self._bg = {}
+        self._floor, self._floor_cols = floor_lines()
+
+    def _background(self, W, H):
+        if (W, H) not in self._bg:
+            self._bg.clear()
+            t = np.linspace(0, 1, H)[:, None]
+            col = (BG_TOP + (BG_BOT - BG_TOP) * t).astype(np.uint8)
+            img = np.empty((H, W, 3), np.uint8)
+            img[:] = col[:, None, :]
+            self._bg[(W, H)] = img
+        return self._bg[(W, H)].copy()
+
+    @staticmethod
+    def _paint(img, view, soup, tint=None):
+        pos, nrm, col = soup
+        nt = len(pos) // 3
+        if nt == 0:
+            return
+        P = pos.reshape(nt, 3, 3)
+        scr, depth = view.project(pos)
+        scr = np.rint(scr).astype(np.int32).reshape(nt, 3, 2)
+        depth = depth.reshape(nt, 3)
+        cen = P.mean(axis=1)
+        N = nrm.reshape(nt, 3, 3).mean(axis=1)
+        N /= np.linalg.norm(N, axis=1, keepdims=True) + 1e-12
+        to_eye = view.eye - cen
+        ok = (np.einsum("ij,ij->i", N, to_eye) > 0) & (depth.min(axis=1) > 0.12)
+        idx = np.nonzero(ok)[0]
+        if len(idx) == 0:
+            return
+        idx = idx[np.argsort(-depth[idx].mean(axis=1))]
+        dist = np.linalg.norm(to_eye[idx], axis=1, keepdims=True) + 1e-12
+        lam = np.clip(N[idx] @ view.light, 0, 1)
+        hv = view.light + to_eye[idx] / dist
+        hv /= np.linalg.norm(hv, axis=1, keepdims=True) + 1e-12
+        spec = np.clip(np.einsum("ij,ij->i", N[idx], hv), 0, 1) ** 26 * 0.22
+        shade = 0.24 + 0.74 * lam + 0.16 * (0.5 + 0.5 * N[idx, 2])
+        base = col.reshape(nt, 3, 3)[idx, 0] * 255.0 if tint is None else np.tile(np.asarray(tint, float), (len(idx), 1))
+        fill = np.clip(base * shade[:, None] + 255.0 * spec[:, None], 0, 255).astype(np.uint8).tolist()
+        for k, i in enumerate(idx.tolist()):
+            cv2.fillConvexPoly(img, scr[i], tuple(fill[k]))
+
+    def render_base(self, w, h, view, tris, ghost, ghost_col):
+        img = self._background(w, h)
+        for (a, b), c in zip(self._floor, self._floor_cols):
+            view.seg(img, a, b, tuple(int(x * 255) for x in c), 1)
+        self._paint(img, view, tris)
+        if ghost is not None:
+            layer = img.copy()
+            self._paint(layer, view, ghost, tint=ghost_col)
+            m = (layer != img).any(axis=2)
+            img[m] = (img[m] * 0.55 + layer[m] * 0.45).astype(np.uint8)
+        return img
+
+
+# ------------------------------------------------------------------ 2D overlay
+def put_text(img, text, org, scale=0.48, color=(232, 233, 237), th=1):
+    cv2.putText(img, text, org, FONT, scale, (12, 14, 18), th + 2, cv2.LINE_AA)
+    cv2.putText(img, text, org, FONT, scale, color, th, cv2.LINE_AA)
+
+
+def _gizmo(img, v, tip, labels):
+    tip = np.asarray(tip, float)
+    dist = float(np.linalg.norm(tip - v.eye))
+    if dist < 0.3:
+        return
+    s = 0.075 * dist
+    cols = [(235, 90, 90), (90, 205, 120), (100, 160, 255)]
+    E = np.eye(3)
+    for k in range(3):
+        e, col = E[k], cols[k]
+        end = tip + e * s
+        side = E[(k + 1) % 3]
+        v.seg(img, tip, end, col, 2)
+        for sg in (1, -1):
+            v.seg(img, end, end - e * s * 0.16 + side * sg * s * 0.07, col, 2)
+        labels.append((end + e * s * 0.06, AXIS_NAMES[k] + "+", col, False))
+        u, w = E[(k + 1) % 3], E[(k + 2) % 3]              # u x w = axis -> right-hand rotation = angle +
+        r = s * 0.5
+        th = np.radians(np.linspace(25, 300, 22))
+        pts = [tip + r * (math.cos(t) * u + math.sin(t) * w) for t in th]
+        dim = tuple(int(c * 0.85) for c in col)
+        for a, c2 in zip(pts[:-1], pts[1:]):
+            v.seg(img, a, c2, dim, 1)
+        tang = -math.sin(th[-1]) * u + math.cos(th[-1]) * w
+        rad = math.cos(th[-1]) * u + math.sin(th[-1]) * w
+        for sg in (1, -1):
+            v.seg(img, pts[-1], pts[-1] - tang * s * 0.15 + rad * sg * s * 0.07, dim, 1)
+        labels.append((pts[-1] + rad * s * 0.14 + tang * s * 0.06, AXIS_NAMES[k + 3] + "+", col, False))
+
+
+def draw_overlay(img, v, fr):
+    h, w = img.shape[:2]
+    labels = list(fr.labels or [])
+    if fr.trail is not None and len(fr.trail) > 1:
+        p, d = v.project(fr.trail)
+        n = len(fr.trail)
+        for k in range(1, n):
+            if d[k] < 0.12 or d[k - 1] < 0.12:
+                continue
+            t = k / n
+            col = (int(30 + 60 * t), int(60 + 110 * t), int(110 + 140 * t))
+            cv2.line(img, (int(p[k - 1, 0]), int(p[k - 1, 1])), (int(p[k, 0]), int(p[k, 1])), col, max(1, int(1 + 1.5 * t)), v.lt)
+    if fr.ghost_tip is not None:
+        g = np.asarray(fr.ghost_tip, float)
+        col = hex_rgb(C.green if fr.ghost_ok else C.amber)
+        p, d = v.project(g)
+        if d[0] > 0.12:
+            c = (int(p[0, 0]), int(p[0, 1]))
+            cv2.circle(img, c, 11, col, 1, v.lt)
+            cv2.line(img, (c[0] - 16, c[1]), (c[0] + 16, c[1]), col, 1, v.lt)
+            cv2.line(img, (c[0], c[1] - 16), (c[0], c[1] + 16), col, 1, v.lt)
+        v.seg(img, g, (g[0], g[1], 0.0), tuple(int(x * 0.55) for x in col), 1)
+    tp, td = v.project(fr.tip)
+    if td[0] > 0.12:
+        c = (int(tp[0, 0]), int(tp[0, 1]))
+        cv2.circle(img, c, 7, (20, 40, 80), -1, v.lt)
+        cv2.circle(img, c, 5, hex_rgb(C.blue), -1, v.lt)
+        cv2.circle(img, c, 7, (235, 242, 255), 1, v.lt)
+    if fr.gizmo:
+        _gizmo(img, v, fr.tip, labels)
+    for P, text, col, dot in labels:
+        p, d = v.project(np.asarray(P, float))
+        if d[0] <= 0.12:
+            continue
+        x, y = int(p[0, 0]), int(p[0, 1])
+        if not (0 <= x < w and 0 <= y < h):
+            continue
+        if dot:
+            cv2.circle(img, (x, y), 5, (15, 15, 15), -1, cv2.LINE_AA)
+            cv2.circle(img, (x, y), 4, col, -1, cv2.LINE_AA)
+        if text:
+            put_text(img, text, (x + 7, y - 7), 0.42, col)
+    # corner axis gizmo
+    org, L = (54, h - 54), 32
+    axes = [((1, 0, 0), (235, 90, 90), "X"), ((0, 1, 0), (90, 205, 120), "Y"), ((0, 0, 1), (100, 160, 255), "Z")]
+    axes.sort(key=lambda a: -float(np.dot(a[0], v.f)))
+    cv2.circle(img, org, L + 12, (24, 27, 33), -1, cv2.LINE_AA)
+    for vec, col, name in axes:
+        x, y = float(np.dot(vec, v.r)), float(np.dot(vec, v.u))
+        e = (int(org[0] + x * L), int(org[1] - y * L))
+        cv2.line(img, org, e, col, 2, cv2.LINE_AA)
+        cv2.circle(img, e, 9, col, -1, cv2.LINE_AA)
+        cv2.putText(img, name, (e[0] - 4, e[1] + 4), FONT, 0.38, (18, 20, 24), 1, cv2.LINE_AA)
+    hud = fr.hud or {}
+    if hud.get("tip_text"):
+        tp, td = v.project(fr.tip)
+        if td[0] > 0.12:
+            x, y = int(tp[0, 0]) + 14, int(tp[0, 1]) - 12
+            tw = cv2.getTextSize(hud["tip_text"], FONT, 0.46, 1)[0][0]
+            put_text(img, hud["tip_text"], (int(np.clip(x, 6, w - tw - 8)), int(np.clip(y, 18, h - 8))), 0.46)
+    if hud.get("ghost_text"):
+        put_text(img, hud["ghost_text"], (14, 26), 0.5, hex_rgb(C.green))
+    if hud.get("msg"):
+        tw = cv2.getTextSize(hud["msg"], FONT, 0.7, 2)[0][0]
+        put_text(img, hud["msg"], ((w - tw) // 2, h // 2), 0.7, (200, 205, 215), 2)
+    foot = []
+    if hud.get("fps") is not None:
+        foot.append(f"{hud['fps']:.0f} fps")
+    if hud.get("backend"):
+        foot.append(hud["backend"])
+    if foot:
+        t = "  ".join(foot)
+        tw = cv2.getTextSize(t, FONT, 0.4, 1)[0][0]
+        put_text(img, t, (w - tw - 10, h - 12), 0.4, (120, 128, 140))
+    return img
+
+
+# ------------------------------------------------------------------ facade
+class Renderer:
+    def __init__(self, backend):
+        self.backend = backend
+        self.name = backend.name
+
+    def render(self, w, h, cam, fr):
+        view = View(cam, w, h)
+        img = self.backend.render_base(w, h, view, fr.tris, fr.ghost_tris, fr.ghost_col)
+        return draw_overlay(img, view, fr)
+
+
+def make_renderer(prefer_gpu=True):
+    """-> (Renderer, note).  Never raises: falls back to the CPU backend and says why."""
+    if prefer_gpu:
+        try:
+            return Renderer(GLBackend()), ""
+        except Exception as exc:
+            return Renderer(CPUBackend()), f"GPU renderer unavailable ({type(exc).__name__}: {exc}); using CPU renderer. pip install moderngl for smooth 3D."
+    return Renderer(CPUBackend()), ""

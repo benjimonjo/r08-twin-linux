@@ -1,0 +1,18 @@
+{
+  "window": "1500x920",
+  "settings": {
+    "cursor_speed": 2400.0,
+    "settle": 0.8,
+    "motion_wait": 4.0,
+    "click_tol": 34,
+    "pos_tol": 0.15,
+    "ang_tol": 1.0,
+    "verify_each": true,
+    "step_plus_larger": true,
+    "ocr_fps": 15,
+    "viz_deg_s": 25.0,
+    "self_learn": true,
+    "gpu": true
+  },
+  "level": 2
+}

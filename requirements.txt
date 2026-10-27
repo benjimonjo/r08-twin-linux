@@ -1,0 +1,7 @@
+numpy
+opencv-python
+mss
+pillow
+pynput        # guided clicking (viewer works without it)
+moderngl      # optional: GPU 3D view (falls back to CPU drawing without it)
+pytesseract   # optional: only for the 'Step size' text; digits no longer need Tesseract
