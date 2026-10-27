@@ -69,11 +69,17 @@ class GLBackend:
         self.lprog = self.ctx.program(vertex_shader=LVS, fragment_shader=LFS)
         self.vbo = self.ctx.buffer(reserve=MAX_VERTS * 36, dynamic=True)
         self.vao = self.ctx.vertex_array(self.prog, [(self.vbo, "3f 3f 3f", "in_pos", "in_nrm", "in_col")])
-        segs, cols = floor_lines()
+        segs, cols = floor_lines(include_axes=False)
         data = np.hstack([segs.reshape(-1, 3), np.repeat(cols, 2, axis=0)]).astype("f4")
         self.lvbo = self.ctx.buffer(data.tobytes())
         self.lvao = self.ctx.vertex_array(self.lprog, [(self.lvbo, "3f 3f", "in_pos", "in_col")])
         self.nline = len(data)
+        all_segs, all_cols = floor_lines()
+        axis_data = np.hstack([all_segs[len(segs):].reshape(-1, 3),
+                               np.repeat(all_cols[len(cols):], 2, axis=0)]).astype("f4")
+        self.avbo = self.ctx.buffer(axis_data.tobytes())
+        self.avao = self.ctx.vertex_array(self.lprog, [(self.avbo, "3f 3f", "in_pos", "in_col")])
+        self.naxis = len(axis_data)
         self.size, self.fbo, self.fbo_ms = None, None, None
         self._ensure(64, 64)                       # fail early (inside make_renderer) if the driver can't do it
         self.render_base(64, 64, View(Camera(), 64, 64),
@@ -93,7 +99,7 @@ class GLBackend:
             self.fbo_ms = None
         self.size = (w, h)
 
-    def render_base(self, w, h, view, tris, ghost, ghost_col):
+    def render_base(self, w, h, view, tris, ghost, ghost_col, show_axes=True):
         mgl, ctx = self.mgl, self.ctx
         self._ensure(w, h)
         target = self.fbo_ms or self.fbo
@@ -104,6 +110,8 @@ class GLBackend:
         mvp = view.mvp().T.astype("f4").tobytes()
         self.lprog["mvp"].write(mvp)
         self.lvao.render(mgl.LINES, vertices=self.nline)
+        if show_axes:
+            self.avao.render(mgl.LINES, vertices=self.naxis)
         parts = [np.hstack(tris)]
         n1 = len(parts[0])
         if ghost is not None:
@@ -137,7 +145,9 @@ class CPUBackend:
 
     def __init__(self):
         self._bg = {}
-        self._floor, self._floor_cols = floor_lines()
+        self._floor, self._floor_cols = floor_lines(include_axes=False)
+        all_floor, all_cols = floor_lines()
+        self._axes, self._axis_cols = all_floor[len(self._floor):], all_cols[len(self._floor_cols):]
 
     def _background(self, W, H):
         if (W, H) not in self._bg:
@@ -179,10 +189,13 @@ class CPUBackend:
         for k, i in enumerate(idx.tolist()):
             cv2.fillConvexPoly(img, scr[i], tuple(fill[k]))
 
-    def render_base(self, w, h, view, tris, ghost, ghost_col):
+    def render_base(self, w, h, view, tris, ghost, ghost_col, show_axes=True):
         img = self._background(w, h)
         for (a, b), c in zip(self._floor, self._floor_cols):
             view.seg(img, a, b, tuple(int(x * 255) for x in c), 1)
+        if show_axes:
+            for (a, b), c in zip(self._axes, self._axis_cols):
+                view.seg(img, a, b, tuple(int(x * 255) for x in c), 1)
         self._paint(img, view, tris)
         if ghost is not None:
             layer = img.copy()
@@ -270,18 +283,18 @@ def draw_overlay(img, v, fr):
             cv2.circle(img, (x, y), 4, col, -1, cv2.LINE_AA)
         if text:
             put_text(img, text, (x + 7, y - 7), 0.42, col)
-    # corner axis gizmo
-    org, L = (54, h - 54), 32
-    axes = [((1, 0, 0), (235, 90, 90), "X"), ((0, 1, 0), (90, 205, 120), "Y"), ((0, 0, 1), (100, 160, 255), "Z")]
-    axes.sort(key=lambda a: -float(np.dot(a[0], v.f)))
-    cv2.circle(img, org, L + 12, (24, 27, 33), -1, cv2.LINE_AA)
-    for vec, col, name in axes:
-        x, y = float(np.dot(vec, v.r)), float(np.dot(vec, v.u))
-        e = (int(org[0] + x * L), int(org[1] - y * L))
-        cv2.line(img, org, e, col, 2, cv2.LINE_AA)
-        cv2.circle(img, e, 9, col, -1, cv2.LINE_AA)
-        cv2.putText(img, name, (e[0] - 4, e[1] + 4), FONT, 0.38, (18, 20, 24), 1, cv2.LINE_AA)
     hud = fr.hud or {}
+    if hud.get("axes", True):
+        org, L = (54, h - 54), 32
+        axes = [((1, 0, 0), (235, 90, 90), "X"), ((0, 1, 0), (90, 205, 120), "Y"), ((0, 0, 1), (100, 160, 255), "Z")]
+        axes.sort(key=lambda a: -float(np.dot(a[0], v.f)))
+        cv2.circle(img, org, L + 12, (24, 27, 33), -1, cv2.LINE_AA)
+        for vec, col, name in axes:
+            x, y = float(np.dot(vec, v.r)), float(np.dot(vec, v.u))
+            e = (int(org[0] + x * L), int(org[1] - y * L))
+            cv2.line(img, org, e, col, 2, cv2.LINE_AA)
+            cv2.circle(img, e, 9, col, -1, cv2.LINE_AA)
+            cv2.putText(img, name, (e[0] - 4, e[1] + 4), FONT, 0.38, (18, 20, 24), 1, cv2.LINE_AA)
     if hud.get("tip_text"):
         tp, td = v.project(fr.tip)
         if td[0] > 0.12:
@@ -316,7 +329,9 @@ class Renderer:
 
     def render(self, w, h, cam, fr):
         view = View(cam, w, h)
-        img = self.backend.render_base(w, h, view, fr.tris, fr.ghost_tris, fr.ghost_col)
+        hud = fr.hud or {}
+        img = self.backend.render_base(w, h, view, fr.tris, fr.ghost_tris, fr.ghost_col,
+                                       bool(hud.get("axes", True)))
         return draw_overlay(img, view, fr)
 
 

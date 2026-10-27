@@ -614,6 +614,7 @@ class QtApp:
             b = QtWidgets.QPushButton(f"Point {idx+1} to target"); b.clicked.connect(lambda checked=False, n=idx: self._object_point_to_target(n)); ol.addWidget(b)
         self.show_objects = QtWidgets.QCheckBox("Show mapped objects"); self.show_objects.setChecked(True); self.show_objects.toggled.connect(self._mark_dirty); ol.addWidget(self.show_objects)
         self.show_gizmo = QtWidgets.QCheckBox("Show tool axis gizmo"); self.show_gizmo.setChecked(True); self.show_gizmo.toggled.connect(self._mark_dirty); ol.addWidget(self.show_gizmo)
+        self.show_axes = QtWidgets.QCheckBox("Show coordinate axes"); self.show_axes.setChecked(True); self.show_axes.toggled.connect(self._mark_dirty); ol.addWidget(self.show_axes)
         self._refresh_objects(); sl.addWidget(objects)
         digit = self._group("Digit reader"); dl = QtWidgets.QVBoxLayout(digit)
         self.raw_label = QtWidgets.QLabel("Waiting for the number table…"); self.raw_label.setWordWrap(True); dl.addWidget(self.raw_label)
@@ -1313,7 +1314,8 @@ class QtApp:
     def _render(self, snap):
         w, h = max(400, self.image_label.width()), max(300, self.image_label.height())
         info = self.robot_mesh.update(self.q_vis)
-        hud = {"backend": self.renderer.name, "fps": self.fps, "gpu": self.gpu_usage}
+        hud = {"backend": self.renderer.name, "fps": self.fps, "gpu": self.gpu_usage,
+               "axes": self.show_axes.isChecked()}
         if snap.pose is not None: hud["tip_text"] = "  ".join(fmt_pos(snap.pose[i]) for i in range(3)) + " in"
         else: hud["msg"] = "Open Setup to select the number table"
         ghost_tris = ghost_tip = None; ghost_ok = True; ghost_col = hex_rgb(C.green)

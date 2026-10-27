@@ -394,7 +394,7 @@ def obj_summary(o):
 
 
 # ------------------------------------------------------------------ floor
-def floor_lines(extent=6.0, step=0.5):
+def floor_lines(extent=6.0, step=0.5, include_axes=True):
     """-> (segments (N,2,3) float32, colours (N,3) 0..1).  Grid + coordinate axes at the base and at the WORLD origin."""
     segs, cols = [], []
     minor, major = np.array([29, 33, 41]) / 255.0, np.array([46, 52, 66]) / 255.0
@@ -404,10 +404,11 @@ def floor_lines(extent=6.0, step=0.5):
         c = major if i % 2 == 0 else minor
         segs.append([(s, -extent, 0), (s, extent, 0)]); cols.append(c)
         segs.append([(-extent, s, 0), (extent, s, 0)]); cols.append(c)
-    axc = [(235, 90, 90), (90, 205, 120), (100, 160, 255)]
-    for org, ln in ((np.zeros(3), 0.55), (K.TABLE_ORIGIN_IN_BASE_M, 0.30)):
-        for k in range(3):
-            e = np.zeros(3)
-            e[k] = ln
-            segs.append([tuple(org), tuple(org + e)]); cols.append(np.array(axc[k]) / 255.0)
+    if include_axes:
+        axc = [(235, 90, 90), (90, 205, 120), (100, 160, 255)]
+        for org, ln in ((np.zeros(3), 0.55), (K.TABLE_ORIGIN_IN_BASE_M, 0.30)):
+            for k in range(3):
+                e = np.zeros(3)
+                e[k] = ln
+                segs.append([tuple(org), tuple(org + e)]); cols.append(np.array(axc[k]) / 255.0)
     return np.array(segs, np.float32), np.array(cols, np.float32)
