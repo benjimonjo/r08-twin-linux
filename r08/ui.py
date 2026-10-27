@@ -28,7 +28,7 @@ from .render import make_renderer
 from .screen_reader import Shared, OcrWorker, IKWorker, split_cells, grab_gray
 from .planner import step_presses, jog_press, plan_presses, step_value, fmt_step, N_LEVELS
 from .guide import Guide
-from .inputs import HAVE_PYNPUT, Cursor, Clicks, Hotkeys, Beacon, dark_titlebar
+from .inputs import HAVE_PYNPUT, WAYLAND_SESSION, LINUX_NO_PYNPUT, Cursor, Clicks, Hotkeys, Beacon, dark_titlebar
 from .picker import Picker, ALL_KEYS, BUTTON_KEYS
 from .widgets import (FONT_UI, FONT_B, FONT_H, FONT_BIG, FONT_NUM, FONT_MONO, FONT_SM, SETTING_DEFS, KEYMAP,
                       NEEDED_BUTTONS, HELP_TEXT, mk_button, restyle, fmt_pos, fmt_ang, JointBar)
@@ -97,7 +97,10 @@ class App:
         if note:
             self.log(note, "warn")
         if not HAVE_PYNPUT:
-            self.log("pynput is not installed \u2013 viewer only.  pip install pynput to enable the guided controls.", "warn")
+            if LINUX_NO_PYNPUT:
+                self.log("Linux global input hooks are disabled outside confirmed X11 sessions; setup keys work when this window has focus.", "warn")
+            else:
+                self.log("pynput is not installed \u2013 viewer only.  pip install pynput to enable the guided controls.", "warn")
         if not self.cfg.get("region"):
             self.log("First run: opening setup \u2013 drag a box around the six numbers, then click a few panel buttons.", "act")
             self.root.after(600, lambda: self.run_setup(ALL_KEYS))
@@ -571,7 +574,6 @@ class App:
             self.log(f"Setup failed: {exc}", "err")
         finally:
             self.root.deiconify()
-            self.root.lift()
             self.setup_open = False
         if not res:
             self.log("Setup cancelled \u2013 nothing changed.", "dim")
@@ -1244,6 +1246,15 @@ def _fmtv(v):
 
 
 def main():
+    if WAYLAND_SESSION:
+        try:
+            from .qt_ui import main as wayland_main
+            wayland_main()
+        except Exception as exc:
+            print("Native Wayland UI could not start:", exc)
+            print("Install PySide6 and the Qt Wayland platform plugin for your Linux distribution.")
+            traceback.print_exc()
+        return
     try:
         print("R08 live twin (R-2000iA/200F) \u2013 starting.  Config:", CONFIG_FILE)
         App().run()

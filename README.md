@@ -4,13 +4,17 @@ Reads the Position/Angle table off the stream, shows a live 3D twin, and guides 
 
 ## Install & run
 ```
-pip install numpy opencv-python mss pillow pynput moderngl
+pip install numpy opencv-python mss pillow pynput moderngl PySide6
 python run.py
 ```
 On Linux Wayland, capture uses libportal's GObject bindings and the XDG
 ScreenCast portal to open a PipeWire stream. Install the system packages for
 PyGObject, libportal's Xdp introspection data, GStreamer, and the GStreamer
-PipeWire plugin. Plasma will ask you to choose a screen and grant access.
+PipeWire plugin. Plasma will ask you to choose a screen and grant access. The
+Wayland UI uses PySide6/Qt; install your distribution's Qt Wayland platform
+plugin if the Qt wheel does not include it. This native frontend currently
+supports the live viewer, screen setup, and digit teaching; guided global
+pointer automation remains unavailable on Wayland.
 On X11, Windows, and macOS the app continues to use `mss` directly.
 * Put this folder where your old `r08_config.json` is (or copy that file in) – your setup carries over.
 * `moderngl` = smooth GPU 3D. Without it the app still works using a slower CPU renderer (it tells you in the log).

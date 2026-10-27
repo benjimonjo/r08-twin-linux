@@ -4,7 +4,7 @@ import sys, traceback
 
 
 def _missing(exc):
-    print(f"\nMissing package: {exc}\nInstall with:\n  pip install numpy opencv-python mss pillow pynput moderngl\n"
+    print(f"\nMissing package: {exc}\nInstall Python packages with:\n  pip install -r requirements.txt\n"
           "(moderngl = smooth GPU 3D view; optional.  pytesseract + Tesseract are only needed for the optional 'Step size' text.)\n")
     try:
         input("Press Enter to close...")

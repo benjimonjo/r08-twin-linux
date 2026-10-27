@@ -83,7 +83,7 @@ class WaylandCapture:
         try:
             portal.create_screencast_session(
                 self.Xdp.OutputType.MONITOR,
-                self.Xdp.ScreencastFlags.NONE,
+                self.Xdp.ScreencastFlags(0),
                 self.Xdp.CursorMode.EMBEDDED,
                 self.Xdp.PersistMode.TRANSIENT,
                 None, None, created, None)

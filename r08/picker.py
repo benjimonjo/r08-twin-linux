@@ -9,6 +9,7 @@ import math
 import tkinter as tk
 from PIL import Image, ImageTk
 from .common import C, nice_btn, new_mss
+from .inputs import WAYLAND_SESSION
 
 STAGE_DEFS = {   # key: (kind, title, hint, optional, short label)
     "region": ("rect", "Drag a box around the six numbers",
@@ -53,6 +54,8 @@ class Picker:
 
     def __init__(self, root, keys, mon_index=0):
         self.root, self.keys, self.i, self.mon_i = root, list(keys), 0, mon_index
+        self.in_root = WAYLAND_SESSION
+        self.root_geometry, self.root_title = root.geometry(), root.title()
         self.sct = new_mss()
         mons = list(self.sct.monitors)
         self.monitors = mons[1:] if len(mons) > 1 else mons
@@ -85,7 +88,12 @@ class Picker:
         else:
             self.result = None
         try:
-            self.win.destroy()
+            if self.in_root:
+                self.cv.destroy()
+                self.root.title(self.root_title)
+                self.root.geometry(self.root_geometry)
+            else:
+                self.win.destroy()
         except Exception:
             pass
         self.done.set(True)
@@ -93,7 +101,10 @@ class Picker:
     def _open(self):
         if self.win is not None:
             try:
-                self.win.destroy()
+                if self.in_root:
+                    self.cv.destroy()
+                else:
+                    self.win.destroy()
             except Exception:
                 pass
         mon = self.mon = self.monitors[self.mon_i]
@@ -106,12 +117,19 @@ class Picker:
                 "Screen capture returned a black image. Check that screen sharing "
                 "was allowed in the desktop permission dialog, then retry setup."
             )
-        w = self.win = tk.Toplevel(self.root)
-        w.overrideredirect(True)
+        if self.in_root:
+            w = self.win = self.root
+            w.title("R08 setup — click this window to enable keyboard controls")
+        else:
+            w = self.win = tk.Toplevel(self.root)
+            w.title("R08 setup — click this window to enable keyboard controls")
         w.geometry(f"{mon['width']}x{mon['height']}+{mon['left']}+{mon['top']}")
-        w.attributes("-topmost", True)
         self.cv = tk.Canvas(w, highlightthickness=0, bd=0, cursor="crosshair", bg="black")
-        self.cv.pack(fill="both", expand=True)
+        if self.in_root:
+            self.cv.place(x=0, y=0, relwidth=1, relheight=1)
+            w.deiconify()
+        else:
+            self.cv.pack(fill="both", expand=True)
         w.update()
         cw, ch = max(self.cv.winfo_width(), 2), max(self.cv.winfo_height(), 2)
         if (cw, ch) != img.size:
@@ -124,9 +142,9 @@ class Picker:
         self.cv.bind("<B1-Motion>", self._motion_drag)
         self.cv.bind("<ButtonRelease-1>", self._release)
         self.cv.bind("<Motion>", self._hover)
-        w.bind("<Key>", self._key)
-        self.cv.bind("<Key>", self._key)
-        w.focus_force()
+        if not self.in_root:
+            w.bind("<KeyPress>", self._key)
+        self.cv.bind("<KeyPress>", self._key)
         self.cv.focus_set()
         self._redraw()
 
@@ -180,6 +198,8 @@ class Picker:
             self._redraw()
 
     def _key(self, e):
+        if self.done.get() or not (0 <= self.i < len(self.keys)):
+            return
         k = e.keysym
         if k in ("Return", "KP_Enter"):
             if self.kind == "rect" and self.pending:
@@ -227,6 +247,10 @@ class Picker:
         return best[1] if best else None
 
     def _press(self, e):
+        # Some Wayland window managers ignore focus requests for newly created
+        # windows. A user click both focuses the app and keeps keys working on
+        # subsequent setup stages.
+        self.cv.focus_set()
         if self.kind == "point":
             self.pts[self.key] = self._abs(e.x, e.y)
             self._next()

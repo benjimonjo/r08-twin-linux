@@ -7,16 +7,30 @@ inputs.py - everything that touches the real mouse / keyboard / overlay windows.
     Beacon    click-through ring + label drawn over the button the user should click
 Without pynput the viewer still works; guided controls are disabled (HAVE_PYNPUT False).
 """
-import sys, math, time, queue, threading, ctypes
+import os, sys, math, time, queue, threading, ctypes
 import tkinter as tk
 from .common import C, clock
 
-try:
-    from pynput import mouse as pn_mouse, keyboard as pn_keyboard
-    HAVE_PYNPUT = True
-except Exception:
+_session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+WAYLAND_SESSION = sys.platform.startswith("linux") and (
+    bool(os.environ.get("WAYLAND_DISPLAY")) or _session_type == "wayland"
+    or (bool(os.environ.get("KDE_FULL_SESSION")) and _session_type != "x11")
+)
+LINUX_NO_PYNPUT = sys.platform.startswith("linux") and (
+    WAYLAND_SESSION or _session_type != "x11"
+)
+if LINUX_NO_PYNPUT:
+    # Only load pynput's global hooks in a confirmed X11 session. They use
+    # XQueryTree and can terminate the process under Wayland or unknown sessions.
     pn_mouse = pn_keyboard = None
     HAVE_PYNPUT = False
+else:
+    try:
+        from pynput import mouse as pn_mouse, keyboard as pn_keyboard
+        HAVE_PYNPUT = True
+    except Exception:
+        pn_mouse = pn_keyboard = None
+        HAVE_PYNPUT = False
 
 
 def make_click_through(win):
@@ -153,6 +167,13 @@ class Beacon:
     KEY = "#010203"
 
     def __init__(self, root):
+        self.visible, self.mode, self.clickable_set = False, "aim", False
+        self.t0 = 0.0
+        if WAYLAND_SESSION:
+            # The guided controls cannot inject global input on Wayland; avoid
+            # creating an unused override-redirect XWayland window as well.
+            self.win = self.cv = None
+            return
         self.win = tk.Toplevel(root)
         self.win.withdraw()
         self.win.overrideredirect(True)
@@ -168,10 +189,10 @@ class Beacon:
         self.ring = self.cv.create_oval(cx - 24, cy - 24, cx + 24, cy + 24, outline=C.yellow, width=4)
         self.pill = self.cv.create_rectangle(0, 0, 0, 0, fill=C.bg, outline=C.yellow, width=2)
         self.text = self.cv.create_text(cx, 28, text="", fill=C.text, font=("Segoe UI Semibold", 13))
-        self.visible, self.mode, self.clickable_set = False, "aim", False
-        self.t0 = 0.0
 
     def show(self, x, y, text, mode="aim"):
+        if self.win is None:
+            return
         self.cv.itemconfig(self.text, text=text)
         bb = self.cv.bbox(self.text)
         if bb:
@@ -193,12 +214,12 @@ class Beacon:
             self.cv.itemconfig(it, outline=col)
 
     def hide(self):
-        if self.visible:
+        if self.visible and self.win is not None:
             self.win.withdraw()
         self.visible = False
 
     def tick(self, now):
-        if not self.visible:
+        if not self.visible or self.win is None:
             return
         ph = (now - self.t0) * (2.4 if self.mode in ("aim", "abort") else 1.0)
         r = 34 + 9 * (0.5 + 0.5 * math.sin(ph * 2 * math.pi))
@@ -206,6 +227,8 @@ class Beacon:
         self.cv.coords(self.outer, cx - r, cy - r, cx + r, cy + r)
 
     def destroy(self):
+        if self.win is None:
+            return
         try:
             self.win.destroy()
         except Exception:
