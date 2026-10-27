@@ -950,7 +950,7 @@ class QtApp:
             if self.capture is None: self.capture = new_mss()
             if getattr(self, "button_recognition_worker", None) and self.button_recognition_worker.isRunning(): return
             self.recognize_button.setEnabled(False); self.recognize_button.setText("Recognizing labels…")
-            self.button_recognition_worker = ButtonRecognitionWorker(self.capture, self)
+            self.button_recognition_worker = ButtonRecognitionWorker(self.capture, self.window)
             self.button_recognition_worker.finished_result.connect(self._button_recognition_finished)
             self.button_recognition_worker.start()
         except Exception as exc:
@@ -981,7 +981,7 @@ class QtApp:
         self.update_button.setEnabled(False); self.update_button.setText("Checking GitHub…")
         self.update_check_manual = bool(manual)
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.update_worker = UpdateWorker(root, parent=self)
+        self.update_worker = UpdateWorker(root, parent=self.window)
         self.update_worker.finished_result.connect(self._update_check_finished)
         self.update_worker.start()
 
@@ -1026,7 +1026,7 @@ class QtApp:
         if answer != QtWidgets.QMessageBox.StandardButton.Yes: return
         self.update_button.setEnabled(False); self.update_button.setText("Updating…")
         self.available_update = None
-        self.update_worker = UpdateWorker(result["root"], result, self)
+        self.update_worker = UpdateWorker(result["root"], result, self.window)
         self.update_worker.finished_result.connect(self._update_install_finished)
         self.update_worker.start()
 
