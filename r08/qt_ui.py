@@ -138,7 +138,37 @@ def detect_panel_buttons(capture):
     monitor = capture.monitors[0]
     image = np.asarray(capture.grab(monitor))
     gray = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
-    scale = 1.75
+    found = {}
+
+    # The colored controls are much easier to locate than their small labels.
+    # OCR each blue button separately at high scale, then save the button
+    # rectangle center (the click target), rather than the text baseline.
+    hsv = cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGR2HSV)
+    blue = cv2.inRange(hsv, np.array([88, 55, 65], np.uint8), np.array([140, 255, 255], np.uint8))
+    blue = cv2.morphologyEx(blue, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    button_config = "--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-"
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w < 12 or h < 8 or w * h < 120 or w / max(1, h) > 8:
+            continue
+        pad = max(2, round(min(w, h) * .12))
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        x1, y1 = min(gray.shape[1], x + w + pad), min(gray.shape[0], y + h + pad)
+        crop = gray[y0:y1, x0:x1]
+        enlarged = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        binary = cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        variants = [binary, cv2.bitwise_not(binary)]
+        for variant in variants:
+            label = pytesseract.image_to_string(variant, config=button_config, timeout=2)
+            label = re.sub(r"[^A-Z+\-]", "", label.upper().replace("−", "-").replace("–", "-"))
+            if label in NEEDED_BUTTONS:
+                found[label] = ([monitor["left"] + x + w / 2, monitor["top"] + y + h / 2], 100)
+                break
+
+    # Keep a full-screen text pass for green/red controls and themes without
+    # blue buttons. Multiple scales improve detection of compact panel labels.
+    scale = 2.5
     enlarged = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     data = pytesseract.image_to_data(enlarged, config="--oem 3 --psm 11", output_type=pytesseract.Output.DICT, timeout=8)
     lines = {}
@@ -147,13 +177,12 @@ def detect_panel_buttons(capture):
         if not word: continue
         try: confidence = float(data["conf"][i])
         except (TypeError, ValueError): confidence = 0
-        if confidence < 20: continue
+        if confidence < 8: continue
         key = (data["page_num"][i], data["block_num"][i], data["par_num"][i], data["line_num"][i])
         left, top, width, height = (int(data[k][i]) for k in ("left", "top", "width", "height"))
         lines.setdefault(key, []).append((left, top, width, height, word, confidence))
     normalize = lambda s: re.sub(r"[^a-z+\-]", "", s.lower().replace("−", "-").replace("–", "-"))
     labels = {normalize(name): name for name in NEEDED_BUTTONS}
-    found = {}
     for words in lines.values():
         words.sort(key=lambda item: item[0])
         for i in range(len(words)):
