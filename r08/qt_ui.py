@@ -79,46 +79,79 @@ class UpdateWorker(QtCore.QThread):
             self.finished_result.emit(False, str(exc))
 
 
+class ButtonPreview(QtWidgets.QLabel):
+    clicked = QtCore.Signal(float, float)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.clicked.emit(event.position().x(), event.position().y())
+
+
 class ButtonReviewDialog(QtWidgets.QDialog):
     def __init__(self, parent, monitor, image, detected, current):
         super().__init__(parent)
         self.setWindowTitle("Review recognized panel buttons")
         self.monitor = dict(monitor); self.buttons = None
+        self.detected = dict(detected)
+        self.positions = {name: detected.get(name, current.get(name)) for name in NEEDED_BUTTONS}
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(QtWidgets.QLabel("Check the detected coordinates. Edit any value before saving; missing labels use existing setup values."))
-        self.preview = QtWidgets.QLabel(); self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(QtWidgets.QLabel("Select a button row, then click the center of that button in the screenshot to set its position. Source shows whether a value came from OCR or saved setup."))
+        self.preview = ButtonPreview(); self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         rgb = cv2.cvtColor(image, cv2.COLOR_BGRA2RGB)
         h, w = rgb.shape[:2]
         qimg = QtGui.QImage(rgb.data, w, h, w * 3, QtGui.QImage.Format.Format_RGB888).copy()
-        pix = QtGui.QPixmap.fromImage(qimg).scaled(960, 500, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                                                    QtCore.Qt.TransformationMode.SmoothTransformation)
-        self.preview.setFixedSize(pix.size()); layout.addWidget(self.preview, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
-        qp = QtGui.QPainter(pix); qp.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        sx, sy = pix.width() / float(self.monitor["width"]), pix.height() / float(self.monitor["height"])
-        qp.setFont(QtGui.QFont("Noto Sans", 8, QtGui.QFont.Weight.Bold))
-        for name in NEEDED_BUTTONS:
-            point = detected.get(name, current.get(name))
-            if point:
-                x = (float(point[0]) - self.monitor["left"]) * sx
-                y = (float(point[1]) - self.monitor["top"]) * sy
-                qp.setPen(QtGui.QPen(QtGui.QColor("#15130a"), 1)); qp.setBrush(QtGui.QColor(C.yellow))
-                qp.drawEllipse(QtCore.QPointF(x, y), 7, 7); qp.drawText(QtCore.QPointF(x + 8, y - 5), name)
-        qp.end()
-        self.preview.setPixmap(pix)
-        self.table = QtWidgets.QTableWidget(len(NEEDED_BUTTONS), 3); self.table.setHorizontalHeaderLabels(["Button", "X screen px", "Y screen px"])
+        self.source_pixmap = QtGui.QPixmap.fromImage(qimg).scaled(960, 500, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                                                                  QtCore.Qt.TransformationMode.SmoothTransformation)
+        self.preview.setFixedSize(self.source_pixmap.size()); layout.addWidget(self.preview, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
+        self.preview.clicked.connect(self._set_selected_position)
+        self.table = QtWidgets.QTableWidget(len(NEEDED_BUTTONS), 4)
+        self.table.setHorizontalHeaderLabels(["Button", "X screen px", "Y screen px", "Source"])
         self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2, 3): self.table.horizontalHeader().setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Stretch)
         for row, name in enumerate(NEEDED_BUTTONS):
             self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(name))
-            point = detected.get(name, current.get(name))
+            point = self.positions[name]
             if point:
                 self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{float(point[0]):.1f}"))
                 self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{float(point[1]):.1f}"))
+            source = "OCR" if name in detected else "Saved setup" if point else "Missing"
+            self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(source))
         layout.addWidget(self.table)
+        self.table.setCurrentCell(0, 0)
+        self._render_preview()
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
-        self.resize(1020, min(900, pix.height() + 350))
+        self.resize(1020, min(900, self.source_pixmap.height() + 390))
+
+    def _render_preview(self):
+        pix = self.source_pixmap.copy()
+        qp = QtGui.QPainter(pix); qp.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        sx = pix.width() / float(self.monitor["width"])
+        sy = pix.height() / float(self.monitor["height"])
+        qp.setFont(QtGui.QFont("Noto Sans", 8, QtGui.QFont.Weight.Bold))
+        for name in NEEDED_BUTTONS:
+            point = self.positions[name]
+            if point:
+                x = (float(point[0]) - self.monitor["left"]) * sx
+                y = (float(point[1]) - self.monitor["top"]) * sy
+                color = QtGui.QColor(C.green if name in self.detected else C.yellow)
+                qp.setPen(QtGui.QPen(QtGui.QColor("#15130a"), 1)); qp.setBrush(color)
+                qp.drawEllipse(QtCore.QPointF(x, y), 7, 7); qp.drawText(QtCore.QPointF(x + 8, y - 5), name)
+        qp.end()
+        self.preview.setPixmap(pix)
+
+    def _set_selected_position(self, px, py):
+        row = self.table.currentRow()
+        if row < 0: return
+        name = NEEDED_BUTTONS[row]
+        x = self.monitor["left"] + px * self.monitor["width"] / self.source_pixmap.width()
+        y = self.monitor["top"] + py * self.monitor["height"] / self.source_pixmap.height()
+        self.positions[name] = [x, y]
+        self.table.item(row, 1).setText(f"{x:.1f}")
+        self.table.item(row, 2).setText(f"{y:.1f}")
+        self.table.item(row, 3).setText("Preview click")
+        self.detected.pop(name, None)
+        self._render_preview()
 
     def _accept(self):
         out = {}
