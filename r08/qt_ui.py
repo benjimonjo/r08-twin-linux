@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 20045)
+Total output lines: 1336
+
 """Native Qt UI used on Linux Wayland sessions.
 
 The Tk UI remains the cross-platform desktop implementation. Tk on Unix is
@@ -591,7 +594,7 @@ class QtApp:
         sl.addWidget(movement)
         objects = self._group("Map objects"); ol = QtWidgets.QVBoxLayout(objects)
         objrow = QtWidgets.QHBoxLayout(); ol.addLayout(objrow)
-        for title, kind in (("New plate", "plate"), ("New pipe", "pipe")):
+        for title, kind in (("New plate", "plate"), ("New hollow pipe", "pipe")):
             b = QtWidgets.QPushButton(title); b.clicked.connect(lambda checked=False, k=kind: self._start_teach(k)); objrow.addWidget(b)
         points_plate = QtWidgets.QPushButton("Plate from points…"); points_plate.clicked.connect(self._add_plate_from_points); ol.addWidget(points_plate)
         self.teach_label = QtWidgets.QLabel("Map surfaces by positioning the tool tip and recording pose points."); self.teach_label.setWordWrap(True); ol.addWidget(self.teach_label)
@@ -655,9 +658,7 @@ class QtApp:
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject); form.addRow(buttons)
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            for key, spin in controls.items(): self.settings[key] = spin.value()
-            for key, check in toggles.items(): self.settings[key] = check.isChecked()
-            self.cfg.set("settings", self.settings); self.cfg.save()
+            for key,…45 tokens truncated…gs", self.settings); self.cfg.save()
 
     def _save_ocr_snapshot(self):
         if not self.cfg.get("region"):
@@ -717,7 +718,7 @@ class QtApp:
             return
         name, ok = QtWidgets.QInputDialog.getText(self.window, "Plate name", "Name:", text=f"Plate {1 + sum(o.get('type') == 'plate' for o in self.objects)}")
         if not ok or not name.strip(): return
-        thickness, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness (in):", 0.5, 0.01, 24.0, 2)
+        thickness, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness extending upward from the mapped face (in):", 0.5, 0.01, 24.0, 2)
         if not ok: return
         trial.update(name=name.strip(), t=thickness)
         self.objects.append(trial); self.cfg.set("objects", self.objects); self.cfg.save()
@@ -747,10 +748,18 @@ class QtApp:
         if len(self.teach["pts"]) < required:
             self.teach_label.setText(f"Point {len(self.teach['pts'])} recorded. Position the tip at the next point."); return
         kind = self.teach["type"]
-        value, ok = QtWidgets.QInputDialog.getDouble(self.window, "Object size", "Plate thickness (in):" if kind == "plate" else "Pipe diameter (in):", 0.5 if kind == "plate" else 4.0, 0.01, 60.0, 2)
-        if not ok: self.teach["pts"].pop(); return
+        if kind == "plate":
+            value, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness extending upward from the mapped face (in):", 0.5, 0.01, 24.0, 2)
+            if not ok: self.teach["pts"].pop(); return
+            inner = None
+        else:
+            value, ok = QtWidgets.QInputDialog.getDouble(self.window, "Pipe outside diameter", "Outside diameter (in):", 4.0, 0.1, 60.0, 2)
+            if not ok: self.teach["pts"].pop(); return
+            inner, ok = QtWidgets.QInputDialog.getDouble(self.window, "Pipe inside diameter", "Inside diameter (in; enter 0 for a solid pipe):", min(3.0, value - 0.01), 0.0, max(0.0, value - 0.01), 2)
+            if not ok: self.teach["pts"].pop(); return
         n = 1 + sum(o["type"] == kind for o in self.objects)
         item = {"type": kind, "name": f"{kind.title()} {n}", "pts": self.teach["pts"], "t" if kind == "plate" else "d": value}
+        if kind == "pipe": item["id"] = inner
         self.objects.append(item); self.cfg.set("objects", self.objects); self.cfg.save()
         self.teach = None; self._refresh_objects(); self.object_list.setCurrentRow(len(self.objects)-1); self.dirty = True
         self.teach_label.setText(f"Mapped {obj_summary(item)}")
@@ -766,10 +775,20 @@ class QtApp:
     def _edit_object(self):
         i = self.object_list.currentRow()
         if i < 0: return
-        obj = self.objects[i]; key = "t" if obj["type"] == "plate" else "d"
-        val, ok = QtWidgets.QInputDialog.getDouble(self.window, "Object size", "Thickness (in):" if key == "t" else "Diameter (in):", float(obj.get(key, .5)), .01, 60, 2)
+        obj = self.objects[i]
+        if obj["type"] == "plate":
+            val, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness extending upward from the mapped face (in):", float(obj.get("t", .5)), .01, 24, 2)
+            if ok: obj["t"] = val
+        else:
+            val, ok = QtWidgets.QInputDialog.getDouble(self.window, "Pipe outside diameter", "Outside diameter (in):", float(obj.get("d", 4)), .1, 60, 2)
+            if not ok: return
+            inner, ok = QtWidgets.QInputDialog.getDouble(self.window, "Pipe inside diameter", "Inside diameter (in; enter 0 for a solid pipe):", float(obj.get("id", 0)), 0, max(0.0, val - .01), 2)
+            if not ok: return
+            obj.update(d=val, id=inner)
+            self.cfg.set("objects", self.objects); self.cfg.save(); self._refresh_objects(); self.object_list.setCurrentRow(i); self.dirty = True
+            return
         if ok:
-            obj[key] = val; self.cfg.set("objects", self.objects); self.cfg.save(); self._refresh_objects(); self.object_list.setCurrentRow(i); self.dirty = True
+            self.cfg.set("objects", self.objects); self.cfg.save(); self._refresh_objects(); self.object_list.setCurrentRow(i); self.dirty = True
 
     def _object_point_to_target(self, n):
         i = self.object_list.currentRow()

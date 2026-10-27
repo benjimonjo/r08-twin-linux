@@ -411,7 +411,7 @@ class App:
         r = tk.Frame(body, bg=C.card)
         r.pack(fill="x")
         mk_button(r, "New plate", lambda: self.start_teach("plate"), padx=10).pack(side="left")
-        mk_button(r, "New pipe", lambda: self.start_teach("pipe"), padx=10).pack(side="left", padx=6)
+        mk_button(r, "New hollow pipe", lambda: self.start_teach("pipe"), padx=10).pack(side="left", padx=6)
         mk_button(r, "Cancel", self.cancel_teach, padx=10).pack(side="left")
         self.teach_lbl = tk.Label(body, text="", bg=C.card, fg=C.yellow, font=FONT_SM, wraplength=340, justify="left", anchor="w")
         self.teach_lbl.pack(fill="x", pady=(6, 0))
@@ -1006,11 +1006,16 @@ class App:
         kind, pts = t["type"], t["pts"]
         n = 1 + sum(o["type"] == kind for o in self.objects)
         if kind == "plate":
-            val = simpledialog.askfloat("Plate thickness", "Thickness (in):", parent=self.root, initialvalue=0.5, minvalue=0.01, maxvalue=24)
+            val = simpledialog.askfloat("Plate thickness", "Thickness extending upward from the mapped face (in):", parent=self.root, initialvalue=0.5, minvalue=0.01, maxvalue=24)
             obj = {"type": "plate", "name": f"Plate {n}", "pts": pts, "t": float(val or 0.5)}
         else:
             val = simpledialog.askfloat("Pipe size", "Outside diameter (in):", parent=self.root, initialvalue=4.0, minvalue=0.1, maxvalue=60)
-            obj = {"type": "pipe", "name": f"Pipe {n}", "pts": pts, "d": float(val or 4.0)}
+            if val is None:
+                self.teach = None; self._teach_msg(); return
+            inner = simpledialog.askfloat("Pipe size", "Inside diameter (in; enter 0 for a solid pipe):", parent=self.root, initialvalue=min(3.0, val - 0.01), minvalue=0.0, maxvalue=max(0.0, val - 0.01))
+            if inner is None:
+                self.teach = None; self._teach_msg(); return
+            obj = {"type": "pipe", "name": f"Pipe {n}", "pts": pts, "d": float(val), "id": float(inner)}
         self.teach = None
         self.objects.append(obj)
         self.sel_i = len(self.objects) - 1
@@ -1029,13 +1034,15 @@ class App:
             return
         o = self.objects[self.sel_i]
         if o["type"] == "plate":
-            v = simpledialog.askfloat("Plate thickness", "Thickness (in):", parent=self.root, initialvalue=o.get("t", 0.5), minvalue=0.01, maxvalue=24)
+            v = simpledialog.askfloat("Plate thickness", "Thickness extending upward from the mapped face (in):", parent=self.root, initialvalue=o.get("t", 0.5), minvalue=0.01, maxvalue=24)
             if v:
                 o["t"] = float(v)
         else:
             v = simpledialog.askfloat("Pipe size", "Outside diameter (in):", parent=self.root, initialvalue=o.get("d", 4.0), minvalue=0.1, maxvalue=60)
-            if v:
-                o["d"] = float(v)
+            if v is not None:
+                inner = simpledialog.askfloat("Pipe size", "Inside diameter (in; enter 0 for a solid pipe):", parent=self.root, initialvalue=o.get("id", 0.0), minvalue=0.0, maxvalue=max(0.0, v - 0.01))
+                if inner is not None:
+                    o["d"], o["id"] = float(v), float(inner)
         self._save_objs()
 
     def point_to_go(self, k):

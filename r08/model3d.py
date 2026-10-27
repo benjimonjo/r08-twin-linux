@@ -324,7 +324,9 @@ def plate_solid(o, selected=False):
         n = -n
     t = float(o.get("t", 0.5)) * IN
     top = [p0, p0 + u, p0 + u + w, p0 + w]
-    V = np.array(top + [p - n * t for p in top])
+    # The three recorded points describe the plate's bottom face; build its
+    # thickness upward from that face in the world coordinate frame.
+    V = np.array(top + [p + n * t for p in top])
     col = (150, 160, 175) if selected else (118, 126, 138)
     return solid_soup(V, PRISM_FACES, col), V.mean(axis=0)
 
@@ -341,12 +343,41 @@ def pipe_solid(o, selected=False):
     up = np.array([0.0, 0.0, 1.0])
     n = up - dd * float(np.dot(up, dd))
     n = np.array([1.0, 0.0, 0.0]) if np.linalg.norm(n) < 1e-6 else n / np.linalg.norm(n)
-    r = float(o.get("d", 4.0)) * IN / 2
-    V = cyl_verts(A - n * r, B - n * r, r)
-    polys = [[i, (i + 1) % SEG, SEG + (i + 1) % SEG, SEG + i] for i in range(SEG)]
-    polys += [list(range(SEG)), list(range(SEG, 2 * SEG))]
-    col = (190, 175, 150) if selected else (150, 138, 120)
-    return solid_soup(V, polys, col), V.mean(axis=0)
+    outer_r = float(o.get("d", 4.0)) * IN / 2
+    inner_r = min(max(0.0, float(o.get("id", 0.0)) * IN / 2), max(0.0, outer_r - 0.005 * IN))
+    center_a, center_b = A - n * outer_r, B - n * outer_r
+    if inner_r <= 1e-8:
+        V = cyl_verts(center_a, center_b, outer_r)
+        polys = [[i, (i + 1) % SEG, SEG + (i + 1) % SEG, SEG + i] for i in range(SEG)]
+        polys += [list(range(SEG)), list(range(SEG, 2 * SEG))]
+        soup = solid_soup(V, polys, (190, 175, 150) if selected else (150, 138, 120))
+        return soup, V.mean(axis=0)
+
+    # Four rings make an open-ended tube: outer wall, inner wall and annular
+    # rims. Preserve each face's winding so the inside normals face the bore.
+    radial = np.array([math.cos(2 * math.pi * i / SEG) * n + math.sin(2 * math.pi * i / SEG) * np.cross(dd, n)
+                       for i in range(SEG)])
+    V = np.concatenate((center_a + outer_r * radial, center_b + outer_r * radial,
+                        center_a + inner_r * radial, center_b + inner_r * radial), axis=0)
+    polys = []
+    for i in range(SEG):
+        j = (i + 1) % SEG
+        polys.append([i, j, SEG + j, SEG + i])
+        polys.append([2 * SEG + j, 2 * SEG + i, 3 * SEG + i, 3 * SEG + j])
+        polys.append([i, 2 * SEG + i, 2 * SEG + j, j])
+        polys.append([SEG + i, SEG + j, 3 * SEG + j, 3 * SEG + i])
+    tri = []
+    for face in polys:
+        for k in range(1, len(face) - 1):
+            tri.append([face[0], face[k], face[k + 1]])
+    tri = np.asarray(tri)
+    P = V[tri]
+    normals = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True) + 1e-12
+    color = (190, 175, 150) if selected else (150, 138, 120)
+    colors = np.tile(np.array(color, np.float32) / 255.0, (len(tri) * 3, 1))
+    soup = (P.reshape(-1, 3).astype(np.float32), np.repeat(normals[:, None, :], 3, axis=1).reshape(-1, 3).astype(np.float32), colors)
+    return soup, V.mean(axis=0)
 
 
 def obj_summary(o):
@@ -355,7 +386,9 @@ def obj_summary(o):
             L, W = plate_dims(o)
             return f"{o['name']}   {L:.1f} x {W:.1f} x {o.get('t', 0.5):g} in"
         L = float(np.linalg.norm(np.asarray(o["pts"][1], float) - np.asarray(o["pts"][0], float)))
-        return f"{o['name']}   dia {o.get('d', 4):g} x {L:.1f} in"
+        inner = float(o.get("id", 0.0))
+        size = f"OD {o.get('d', 4):g}" + (f" / ID {inner:g}" if inner > 0 else "")
+        return f"{o['name']}   {size} x {L:.1f} in"
     except Exception:
         return o.get("name", "?")
 
