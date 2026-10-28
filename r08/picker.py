@@ -24,7 +24,12 @@ STAGE_DEFS = {   # key: (kind, title, hint, optional, short label)
     "ang_br": ("point", "Click the Za\u2212 button", "Bottom-right button of the Angle block.", False, "Za\u2212"),
     "step_plus": ("point", "Click Step+", "The green button.", False, "Step+"),
     "step_minus": ("point", "Click Step\u2212", "The red button next to it.", False, "Step\u2212"),
+    "camera_step_plus": ("point", "Click Camera Step+", "The green camera-jog step button.", False, "Camera Step+"),
+    "camera_step_minus": ("point", "Click Camera Step\u2212", "The red camera-jog step button.", False, "Camera Step\u2212"),
     "abort": ("point", "Click Abort", "The red Abort button.", False, "Abort"),
+    "backup": ("point", "Click Backup", "The Backup safety button.", False, "Backup"),
+    "safe_j23": ("point", "Click Safe J23", "The Safe J23 position button.", False, "Safe J23"),
+    "safe_j456": ("point", "Click Safe J456", "The Safe J456 position button.", False, "Safe J456"),
     "review": ("review", "Check the button positions",
                "Drag any marker that isn\u2019t centred on its button, then press Enter.", False, ""),
     "status": ("rect", "Drag a box around the coloured IDLE / MOVING banner",
@@ -32,7 +37,9 @@ STAGE_DEFS = {   # key: (kind, title, hint, optional, short label)
     "step_label": ("rect", "Drag a box around the \u2018Step size: \u2026\u2019 text",
                    "Select this on the movement-panel capture. It is required for continuous step-size reading (needs Tesseract). Esc cancels setup.", False, "step text"),
 }
-BUTTON_KEYS = ["pos_tl", "pos_br", "ang_tl", "ang_br", "step_plus", "step_minus", "abort", "review"]
+BUTTON_KEYS = ["pos_tl", "pos_br", "ang_tl", "ang_br", "step_plus", "step_minus",
+               "camera_step_plus", "camera_step_minus", "abort", "backup",
+               "safe_j23", "safe_j456", "review"]
 ALL_KEYS = ["region"] + BUTTON_KEYS + ["status", "step_label"]
 
 
@@ -47,7 +54,10 @@ def compute_buttons(pts):
                 out[top[c]], out[bot[c]] = (x, y0), (x, y1)
     grid("pos_tl", "pos_br", ["X+", "Y+", "Z+"], ["X-", "Y-", "Z-"])
     grid("ang_tl", "ang_br", ["Xa+", "Ya+", "Za+"], ["Xa-", "Ya-", "Za-"])
-    for k, n in (("step_plus", "Step+"), ("step_minus", "Step-"), ("abort", "Abort")):
+    for k, n in (("step_plus", "Step+"), ("step_minus", "Step-"),
+                 ("camera_step_plus", "Camera Step+"), ("camera_step_minus", "Camera Step-"),
+                 ("abort", "Abort"), ("backup", "Backup"),
+                 ("safe_j23", "Safe J23"), ("safe_j456", "Safe J456")):
         if k in pts:
             out[n] = pts[k]
     return {k: [float(v[0]), float(v[1])] for k, v in out.items()}

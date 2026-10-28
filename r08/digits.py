@@ -300,8 +300,8 @@ def segment(gray):
                 glyphs.append(Glyph(x, y, w, h, '-'))
             elif y + h >= bot - 0.25 * tall and w <= 0.4 * tall:
                 glyphs.append(Glyph(x, y, w, h, '.'))
-        elif hh < 0.86:
-            if 0.7 <= w / h <= 1.4:
+        elif hh < 0.92:
+            if 0.8 <= w / h <= 1.4:
                 glyphs.append(Glyph(x, y, w, h, '+'))
         else:
             pieces = [(x, x + w)]

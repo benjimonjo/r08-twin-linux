@@ -13,11 +13,12 @@ Colours in the soup are 0..1 floats.
 """
 import math
 import os
+import json
 import numpy as np
 import cv2
 from .common import C, IN, hex_rgb
 from . import kinematics as K
-from .step_importer import load_step_mesh
+from .step_importer import load_ply_mesh
 
 SEG = 24
 _ANG = np.linspace(0.0, 2 * np.pi, SEG, endpoint=False)
@@ -25,7 +26,7 @@ _COS, _SIN = np.cos(_ANG)[:, None], np.sin(_ANG)[:, None]
 PRISM_FACES = [[0, 1, 2, 3], [4, 7, 6, 5], [0, 4, 5, 1], [1, 5, 6, 2], [2, 6, 7, 3], [3, 7, 4, 0]]
 
 PLATE_W, PLATE_T = 0.24, 0.05
-SPIKE_R, TIP_LEN, TIP_R = 0.0115, 0.055, 0.0015
+SPIKE_R, TIP_LEN, TIP_R = 0.006, 0.055, 0.0015
 # FANUC's characteristic warm yellow, with separate enamel, joint, and cover
 # colors so the model reads as cast housings rather than one yellow silhouette.
 Y, YD, BK, GR, RD, TIPC = "#f5c900", "#d9a900", "#202329", "#646b73", C.rob_red, "#d9d2b0"
@@ -454,36 +455,92 @@ class RobotMesh:
 
 # ------------------------------------------------------------------ active STEP robot model
 class RobotMesh:
-    """Render the supplied FANUC R-2000iA/165F full STEP assembly."""
+    """Render the separate robot_files STL links using their DH frames."""
 
     def __init__(self):
-        path = os.path.join(
+        root = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
-            "fanuc-r2000ia-165f.snapshot.2",
-            "FANUC_R2000iA165F.STEP",
+            "robot_files",
         )
-        self.triangles_data = load_step_mesh(path)
-        self._base_positions = self.triangles_data[0].copy()
-        self._zero_tip = K.forward_kinematics(np.zeros(6))[4]
+        with open(os.path.join(root, "robot.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.dh = data["dh"]
+        mesh_files = {item["name"]: item["stl"] for item in data["meshes"]}
+        self.meshes = [
+            (load_ply_mesh(os.path.join(root, mesh_files[f"link{i}" if i else "link0_base"].replace(".stl", ".ply")), axis_order=(0, 1, 2)), i)
+            for i in range(7)
+        ]
         self.brand_points = []
+        self.triangles_data = None
+        self.update(np.zeros(6))
+
+    @staticmethod
+    def _dh_transform(item, q):
+        alpha = float(item["alpha_rad"])
+        a = float(item["a_mm"]) * 0.001
+        d = float(item["d_mm"]) * 0.001
+        theta = float(item["theta_offset_rad"]) + q
+        ca, sa = math.cos(alpha), math.sin(alpha)
+        ct, st = math.cos(theta), math.sin(theta)
+        return np.array([
+            [ct, -st, 0.0, a],
+            [st * ca, ct * ca, -sa, -d * sa],
+            [st * sa, ct * sa, ca, d * ca],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
 
     def update(self, q):
         q = np.asarray(q, float)
-        _, joints, _, flange, tip = K.forward_kinematics(q)
-        # The supplied STEP is a fused assembly, not separate joint solids.
-        # Move the complete CAD envelope by the live TCP displacement so it
-        # follows detected motion without inventing unsafe link articulation.
+        transforms = [np.eye(4)]
+        for item, angle in zip(self.dh, q):
+            transforms.append(transforms[-1] @ self._dh_transform(item, angle))
+        chunks, normals, colors = [], [], []
+        for (mesh, frame), color in zip(self.meshes, [GR, Y, Y, Y, Y, Y, Y, Y, Y]):
+            positions, local_normals, local_colors = mesh
+            T = transforms[frame]
+            p = positions.reshape(-1, 3)
+            world = p @ T[:3, :3].T + T[:3, 3]
+            n = local_normals.reshape(-1, 3) @ T[:3, :3].T
+            chunks.append(world.astype(np.float32))
+            normals.append(n.astype(np.float32))
+            colors.append(local_colors)
+        # The three probing spikes are defined in the local flange frame:
+        # lengths and lateral offsets are measured from the end of the arm.
+        flange = transforms[6]
+        fl = flange[:3, 3]
+        # Spike length follows J6's axis; the row is offset across the
+        # perpendicular flange axis.
+        axis, lateral, thickness = flange[:3, 2], flange[:3, 0], flange[:3, 1]
+        tool_parts = []
+        plate = box_verts(
+            fl - axis * 0.012, fl + axis * 0.016,
+            lateral, thickness, PLATE_W, PLATE_T, PLATE_W, PLATE_T,
+        )
+        tool_parts.append(solid_soup(plate, PRISM_FACES, hex_rgb(Y)))
+        for length_in, offset_in in K.SPIKES_IN:
+            center = fl + lateral * offset_in * IN
+            end = center + axis * length_in * IN
+            tool_parts.append(solid_soup(
+                cyl_verts(center + axis * 0.016, end, SPIKE_R, TIP_R),
+                [[i, (i + 1) % SEG, SEG + (i + 1) % SEG, SEG + i]
+                 for i in range(SEG)] + [list(range(SEG)), list(range(SEG, 2 * SEG))],
+                hex_rgb(Y),
+            ))
+        for positions, local_normals, color in tool_parts:
+            chunks.append(positions)
+            normals.append(local_normals)
+            colors.append(color)
         self.triangles_data = (
-            self._base_positions + (tip - self._zero_tip),
-            self.triangles_data[1],
-            self.triangles_data[2],
+            np.concatenate(chunks),
+            np.concatenate(normals),
+            np.concatenate(colors),
         )
         positions = self.triangles_data[0]
         self.brand_points = [positions.reshape(-1, 3).mean(axis=0)]
         return type("Info", (), {
-            "joints": joints,
-            "flange": flange[:3, 3],
-            "tip": tip,
+            "joints": K.forward_kinematics(q)[1],
+            "flange": K.forward_kinematics(q)[3][:3, 3],
+            "tip": K.forward_kinematics(q)[4],
         })()
 
     def triangles(self):

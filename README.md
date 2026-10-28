@@ -1,13 +1,11 @@
 # R08 live twin v3 – FANUC R-2000iA/200F
 
-The active robot appearance is imported from
-`fanuc-r2000ia-165f.snapshot.2/FANUC_R2000iA165F.STEP` using CadQuery/OpenCascade.
-The STEP is a fused CAD assembly rather than separate joint solids. The
-existing kinematic chain drives pose calculations, and the imported envelope
-translates by the live TCP displacement so detected motion is reflected
-without pretending that the fused CAD can articulate. The complete
-tessellated assembly is retained for surface continuity and correct rendering.
-The folder's original STL is a partial component, not the complete robot.
+The active robot appearance is loaded from `robot_files`, using the separate
+colorized PLY links and `robot.json` DH data. The exported materials preserve
+the FANUC-style yellow housings, charcoal base/covers, and red motor details.
+Each link is transformed by its joint frame, so detected motion is reflected
+in the articulated model. The older STEP and STL assets remain available as
+reference files.
 
 Reads the Position/Angle table off the stream, shows a live 3D twin, and guides you click-by-click on the jog panel.
 
@@ -32,6 +30,49 @@ and libportal Xdp introspection bindings for your distribution.
 Full setup now asks for the panel's step-size text region on the movement-panel
 capture. The step OCR worker reads it continuously (about twice per second) and
 syncs the selected jog size.
+Panel button recognition also detects the camera controls (`Up`, `Down`, `Left`,
+`Right`, `Zoom+`, `Zoom-`, `Reset Camera`, and `Switch Camera`) from their
+regular layout, including the dark buttons that are not found by color
+segmentation.
+It also recognizes and exposes the panel safety controls `Abort`, `Backup`,
+`Safe J23`, and `Safe J456` in the UI and button review calibration. The two
+safe-position buttons are kept separate because the panel contains both.
+Camera jog step buttons are exposed as `Camera Step+` and `Camera Step-`,
+separate from the robot position step buttons.
+Once calibrated, these controls are available in the UI's **Panel camera
+controls** group. They use the same manual-confirm or optional automated panel
+action flow as robot movement buttons.
+The native UI also has a **Configuration** tab containing the capture, number
+table, panel-button, camera-video, step-size, and status setup actions. Its
+**Find arm reach limits** action samples the configured joint limits and stores
+an estimated TCP workspace bounding box in the configuration.
+The Live twin view includes **Map camera onto robot**. Configure the Discord
+camera region, choose **Configuration -> Calibrate camera using robot points**,
+then click the landmarks in this order: base, J1 through J6, flange, and tool
+tip. After calibration, the live camera texture is projected onto the
+reconstructed robot and can be toggled from the Live twin toolbar.
+The Configuration tab also includes a **Debug view**. Enable **Show live camera
+preview** to inspect the captured frame, resolution, calibration landmarks,
+and the latest camera update time.
+On Wayland, PipeWire screen-share restore tokens are now saved in
+`r08_config.json` separately for the primary capture and movement-panel monitor
+or window. Subsequent sessions reuse the portal permission; if the desktop
+revokes a token, R08 automatically falls back to the normal screen-share
+chooser and saves the replacement token.
+The robot position table and Discord camera region use the same primary
+PipeWire capture session, so they can be selected from one shared screen
+stream. Use **Configuration -> Clear saved PipeWire tokens** when you want the
+desktop chooser to appear again.
+Automated pointer input accepts normal PipeWire/RemoteDesktop scaling
+differences between the capture stream and input stream instead of rejecting
+the session for a mismatched aspect ratio.
+It still verifies that the RemoteDesktop stream overlaps the calibrated
+capture monitor. If KDE selects another monitor, R08 stops before moving the
+mouse and reports the expected and selected screen geometry.
+Calibrated landmark markers are recomputed from the current live joint pose, so
+they move with the robot instead of remaining fixed at their original image
+coordinates. The Live twin view also shows the moving `C0`, `C1`, etc. markers
+when camera mapping is enabled.
 While a coarse jog step is selected, the position reader increases its sampling
 rate and rereads all six positions so large movements are not skipped.
 Install `pytesseract` and the Tesseract system executable for that feature and
@@ -44,7 +85,7 @@ On X11, Windows, and macOS the app continues to use `mss` directly.
 ## What changed vs v2
 | Problem | Fix |
 |---|---|
-| Model was wrong | Rebuilt as R-2000iA/200F: reach 2483 mm, J2 offset 312, lower arm 1075, forearm 1096, J4 motor box at the elbow, round wrist cap, flat tool plate + 3 round spikes. TCP = tip of the 14.4 in spike. |
+| Model was wrong | Rebuilt as R-2000iA/200F from the separate `robot_files` links: flat tool plate plus three slim, separated local spikes. The spike lengths follow the last-joint (J6) axis, with the row offset perpendicular to it. The TCP is the tip of the longest 14.4 in spike, and detected coordinates are interpreted at that tool point. |
 | 5↔9 and other misreads | New digit reader (`r08/digits.py`): glyph segmentation + template matching trained on *your* font, strict layout rules (`+65.3`, `+170`), two-scan confirmation, plus the speed gate. Tested 600/600 on noisy synthetic cells using seed fonts that differ from the real one. |
 | Lag | GPU renderer (OpenGL, 4× MSAA) in the main thread; OCR is ~100× cheaper (no Tesseract calls); render only when something changed. |
 

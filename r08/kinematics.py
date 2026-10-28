@@ -20,10 +20,12 @@ Public API:
 """
 import math
 import os
+import json
 import numpy as np
 from .common import IN, wrap180
 
 MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "FANUC_R2000iA_200F_model")
+ROBOT_FILES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "robot_files")
 _MODEL_DATA = {
     "nominal_joint_origins_m": {
         "J1": [0.0, 0.0, 0.9], "J2": [0.0, 0.0, 0.175],
@@ -41,9 +43,23 @@ _MODEL_DATA = {
 }
 _model_data_path = os.path.join(MODEL_DIR, "kinematics.json")
 if os.path.isfile(_model_data_path):
-    import json
     with open(_model_data_path, encoding="utf-8") as _fh:
         _MODEL_DATA = json.load(_fh)
+_robot_json_path = os.path.join(ROBOT_FILES_DIR, "robot.json")
+_ROBOT_DH = None
+if os.path.isfile(_robot_json_path):
+    with open(_robot_json_path, encoding="utf-8") as _fh:
+        _ROBOT_DH = json.load(_fh)
+if _ROBOT_DH is not None:
+    _MODEL_DATA["nominal_joint_origins_m"] = {
+        f"J{i + 1}": [0.0, 0.0, float(item["d_mm"]) * 0.001]
+        for i, item in enumerate(_ROBOT_DH["dh"])
+    }
+    _MODEL_DATA["joint_limits"] = [
+        {"range_deg": [_ROBOT_DH["limits"]["min_deg"][i], _ROBOT_DH["limits"]["max_deg"][i]],
+         "axis": [0.0, 0.0, 1.0]}
+        for i in range(6)
+    ]
 J2_HEIGHT = float(_MODEL_DATA["nominal_joint_origins_m"]["J1"][2])
 JOINT_ORIGINS = np.array([_MODEL_DATA["nominal_joint_origins_m"][f"J{i}"] for i in range(1, 7)], float)
 JOINT_AXES = np.array([item["axis"] for item in _MODEL_DATA["joint_limits"]], float)
@@ -58,7 +74,7 @@ TABLE_ORIGIN_IN_BASE_M = np.array([0.0, 0.0, J2_HEIGHT])
 TABLE_FRAME_TO_ROBOT_R = np.eye(3)
 TOOL_FRAME_Y_DEG = 90.0
 
-SPIKES_IN = [(10.8, -1.25), (7.2, 0.0), (14.4, 1.25)]      # medium, short, long
+SPIKES_IN = [(10.8, -1.5), (7.2, 0.0), (14.4, 1.5)]       # medium, short, long
 TCP_SPIKE = 2
 TOOL = {"axis": 2, "sign": 1.0}
 
@@ -92,10 +108,13 @@ def thick_axis():
 
 
 def tool_local_tip():
-    return np.zeros(3)
+    length_in, offset_in = SPIKES_IN[TCP_SPIKE]
+    return np.array([offset_in, 0.0, length_in]) * IN
 
 
 def forward_kinematics(q):
+    if _ROBOT_DH is not None:
+        return _forward_kinematics_dh(q)
     Rm = np.eye(3)
     p = np.zeros(3)
     jp = np.empty((6, 3))
@@ -113,6 +132,51 @@ def forward_kinematics(q):
     Tf = np.eye(4)
     Tf[:3, :3] = Rm
     Tf[:3, 3] = p_fl
+    return T, jp, ja, Tf, tip
+
+
+def _dh_matrix(item, q):
+    alpha = float(item["alpha_rad"])
+    a = float(item["a_mm"]) * 0.001
+    d = float(item["d_mm"]) * 0.001
+    theta = float(item["theta_offset_rad"]) + q
+    ca, sa = math.cos(alpha), math.sin(alpha)
+    ct, st = math.cos(theta), math.sin(theta)
+    return np.array([
+        [ct, -st, 0.0, a],
+        [st * ca, ct * ca, -sa, -d * sa],
+        [st * sa, ct * sa, ca, d * ca],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+
+
+def _forward_kinematics_dh(q):
+    q = np.asarray(q, float)
+    cur = np.eye(4)
+    jp = np.empty((6, 3))
+    ja = np.empty((6, 3))
+    for i, (item, angle) in enumerate(zip(_ROBOT_DH["dh"], q)):
+        alpha = float(item["alpha_rad"])
+        a = float(item["a_mm"]) * 0.001
+        ca, sa = math.cos(alpha), math.sin(alpha)
+        pre = cur @ np.array([
+            [1.0, 0.0, 0.0, a],
+            [0.0, ca, -sa, 0.0],
+            [0.0, sa, ca, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        jp[i] = pre[:3, 3]
+        ja[i] = pre[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        rotation = np.eye(4)
+        rotation[:3, :3] = rot_axis(
+            (0.0, 0.0, 1.0), float(item["theta_offset_rad"]) + angle
+        )
+        cur = pre @ rotation
+        cur[:3, 3] += cur[:3, :3] @ np.array([0.0, 0.0, float(item["d_mm"]) * 0.001])
+    Tf = cur.copy()
+    tip = Tf[:3, 3] + Tf[:3, :3] @ tool_local_tip()
+    T = cur.copy()
+    T[:3, 3] = tip
     return T, jp, ja, Tf, tip
 
 
@@ -145,6 +209,26 @@ def rotation_error_vector(cur, tgt):
 
 def clamp_q(q):
     return np.clip(np.asarray(q, float), JOINT_LIMITS_RAD[:, 0], JOINT_LIMITS_RAD[:, 1])
+
+
+def workspace_bounds(sample_count=20000, seed=8):
+    """Estimate the TCP workspace from uniformly sampled joint-limit poses.
+
+    The result is an estimate, not a collision or singularity boundary. Increase
+    sample_count when tighter bounds are needed.
+    """
+    rng = np.random.default_rng(seed)
+    samples = rng.uniform(JOINT_LIMITS_RAD[:, 0], JOINT_LIMITS_RAD[:, 1],
+                          size=(int(sample_count), 6))
+    points = np.empty((len(samples), 3), float)
+    for index, q in enumerate(samples):
+        points[index] = forward_kinematics(q)[4]
+    return {
+        "min_m": points.min(axis=0),
+        "max_m": points.max(axis=0),
+        "max_radius_m": float(np.linalg.norm(points, axis=1).max()),
+        "samples": len(points),
+    }
 
 
 def unwrap_q_to_reference(q, reference):

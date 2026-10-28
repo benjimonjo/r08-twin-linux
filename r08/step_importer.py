@@ -28,7 +28,7 @@ def load_step_mesh(path, tolerance_mm=10.0):
     return _triangle_soup(positions)
 
 
-def load_stl_mesh(path):
+def load_stl_mesh(path, axis_order=(0, 1, 2)):
     """Return an STL triangle soup in metres, oriented with Z as vertical."""
     if not os.path.isfile(path):
         raise FileNotFoundError(f"STL robot model not found: {path}")
@@ -46,8 +46,52 @@ def load_stl_mesh(path):
     raw = raw.reshape(count, 3, 3)
     # The supplied CAD uses Y as vertical. Convert millimetres to metres and
     # map CAD (X, Y, Z) to application (X, Z, Y).
-    positions = raw[:, :, (0, 2, 1)].reshape(-1, 3) * 0.001
+    positions = raw[:, :, axis_order].reshape(-1, 3) * 0.001
     return _triangle_soup(positions)
+
+
+def load_ply_mesh(path, axis_order=(0, 1, 2)):
+    """Return a binary little-endian PLY triangle soup with vertex colors."""
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"PLY robot mesh not found: {path}")
+    with open(path, "rb") as fh:
+        header = []
+        while True:
+            line = fh.readline()
+            if not line:
+                raise RuntimeError(f"Invalid PLY header: {path}")
+            text = line.decode("ascii", errors="strict").strip()
+            header.append(text)
+            if text == "end_header":
+                break
+        if "format binary_little_endian 1.0" not in header:
+            raise RuntimeError(f"Only binary little-endian PLY files are supported: {path}")
+        vertex_count = next(int(line.split()[2]) for line in header if line.startswith("element vertex"))
+        face_count = next(int(line.split()[2]) for line in header if line.startswith("element face"))
+        vertex_dtype = np.dtype([
+            ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+            ("red", "u1"), ("green", "u1"), ("blue", "u1"),
+        ])
+        vertices = np.frombuffer(fh.read(vertex_count * vertex_dtype.itemsize), vertex_dtype)
+        faces = []
+        for _ in range(face_count):
+            count = struct.unpack("<B", fh.read(1))[0]
+            faces.append(struct.unpack(f"<{count}i", fh.read(count * 4)))
+    if len(vertices) != vertex_count or not all(len(face) >= 3 for face in faces):
+        raise RuntimeError(f"PLY robot mesh contains incomplete geometry: {path}")
+    points = np.column_stack((vertices["x"], vertices["y"], vertices["z"]))[:, axis_order] * 0.001
+    indices = np.asarray([face[:3] for face in faces], dtype=np.int64)
+    positions = points[indices].reshape(-1, 3)
+    vertex_colors = np.column_stack((vertices["red"], vertices["green"], vertices["blue"])) / 255.0
+    colors = vertex_colors[indices].mean(axis=1).reshape(-1, 1, 3)
+    colors = np.repeat(colors, 3, axis=1).reshape(-1, 3).astype(np.float32)
+    normals = np.cross(
+        positions[1::3] - positions[0::3],
+        positions[2::3] - positions[0::3],
+    )
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True) + 1e-12
+    normals = np.repeat(normals, 3, axis=0)
+    return positions.astype(np.float32), normals.astype(np.float32), colors
 
 
 def _triangle_soup(positions):

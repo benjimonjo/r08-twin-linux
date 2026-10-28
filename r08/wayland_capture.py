@@ -23,7 +23,7 @@ class _Shot:
 
 class WaylandCapture:
     """ScreenCast portal + PipeWire capture, with mss-compatible grab()."""
-    def __init__(self, source="monitor"):
+    def __init__(self, source="monitor", restore_token=None):
         try:
             import gi
             gi.require_version("Gst", "1.0")
@@ -38,6 +38,8 @@ class WaylandCapture:
             ) from exc
         self.Gst, self.Gio, self.GLib, self.Xdp = Gst, Gio, GLib, Xdp
         self.source = str(source).lower()
+        self.restore_token = restore_token
+        self.new_restore_token = None
         if self.source not in ("monitor", "window"):
             raise ValueError("Wayland capture source must be 'monitor' or 'window'.")
         Gst.init(None)
@@ -76,6 +78,10 @@ class WaylandCapture:
                 if self._pw_fd < 0:
                     raise RuntimeError("The portal could not open its PipeWire connection.")
                 self._session = session
+                try:
+                    self.new_restore_token = session.get_restore_token()
+                except (AttributeError, TypeError):
+                    self.new_restore_token = None
             except Exception as exc:
                 failure.append(exc)
             loop.quit()
@@ -111,12 +117,14 @@ class WaylandCapture:
                 return False
 
             timeout_id = self.GLib.timeout_add_seconds(90, portal_timeout)
+            persist_mode = getattr(self.Xdp.PersistMode, "PERMANENT",
+                                   getattr(self.Xdp.PersistMode, "PERSISTENT",
+                                           self.Xdp.PersistMode.TRANSIENT))
             portal.create_screencast_session(
                 output_type,
                 self.Xdp.ScreencastFlags(0),
                 self.Xdp.CursorMode.EMBEDDED,
-                self.Xdp.PersistMode.TRANSIENT,
-                None, cancellable, created, None)
+                persist_mode, self.restore_token, cancellable, created, None)
             loop.run()
         except Exception as exc:
             raise RuntimeError(f"Could not open the desktop screen sharing portal: {exc}") from exc

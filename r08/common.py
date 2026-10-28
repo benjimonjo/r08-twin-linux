@@ -130,7 +130,7 @@ def set_capture_source(source):
         _wayland_capture_source = source
 
 
-def new_mss(separate=False, source=None):
+def new_mss(separate=False, source=None, restore_token=None):
     """Capture with PipeWire portal on Wayland; use mss on other desktops.
 
     ``separate=True`` opens an independent screen-share session/source.
@@ -140,11 +140,12 @@ def new_mss(separate=False, source=None):
     if sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY"):
         if separate:
             from .wayland_capture import WaylandCapture
-            return WaylandCapture(source=source or "monitor")
+            return WaylandCapture(source=source or "monitor", restore_token=restore_token)
         with _capture_lock:
             if _wayland_capture is None:
                 from .wayland_capture import WaylandCapture
-                _wayland_capture = WaylandCapture(source=source or _wayland_capture_source)
+                _wayland_capture = WaylandCapture(
+                    source=source or _wayland_capture_source, restore_token=restore_token)
             return _wayland_capture
     import mss
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()

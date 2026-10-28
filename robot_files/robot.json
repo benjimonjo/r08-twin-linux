@@ -1,0 +1,151 @@
+{
+  "name": "Fanuc R-2000iA/200F",
+  "units": "mm / degrees",
+  "dh_convention": "modified (Craig): T_k = Rx(alpha) Tx(a) Rz(theta_offset+q_k) Tz(d)",
+  "dh": [
+    {
+      "alpha_rad": 0.0,
+      "a_mm": 0.0,
+      "theta_offset_rad": 0.0,
+      "d_mm": 670.0
+    },
+    {
+      "alpha_rad": -1.5707963267948966,
+      "a_mm": 312.0,
+      "theta_offset_rad": -1.5707963267948966,
+      "d_mm": 0.0
+    },
+    {
+      "alpha_rad": 0.0,
+      "a_mm": 1075.0,
+      "theta_offset_rad": 0.0,
+      "d_mm": 0.0
+    },
+    {
+      "alpha_rad": -1.5707963267948966,
+      "a_mm": 225.0,
+      "theta_offset_rad": 0.0,
+      "d_mm": 1110.0
+    },
+    {
+      "alpha_rad": 1.5707963267948966,
+      "a_mm": 0.0,
+      "theta_offset_rad": 0.0,
+      "d_mm": 0.0
+    },
+    {
+      "alpha_rad": -1.5707963267948966,
+      "a_mm": 0.0,
+      "theta_offset_rad": 0.0,
+      "d_mm": 260.0
+    }
+  ],
+  "limits": {
+    "min_deg": [
+      -180.0,
+      -60.0,
+      -132.0,
+      -360.0,
+      -125.0,
+      -360.0
+    ],
+    "max_deg": [
+      180.0,
+      75.0,
+      230.0,
+      360.0,
+      125.0,
+      360.0
+    ],
+    "alt_min_deg": [
+      -180.0,
+      -60.0,
+      -305.0,
+      -360.0,
+      -125.0,
+      -360.0
+    ],
+    "alt_max_deg": [
+      180.0,
+      75.0,
+      192.0,
+      360.0,
+      125.0,
+      360.0
+    ]
+  },
+  "meshes": [
+    {
+      "name": "link0_base",
+      "ply": "meshes/link0_base.ply",
+      "stl": "meshes/link0_base.stl",
+      "frame": 0,
+      "triangles": 4412,
+      "sub_meshes": 1
+    },
+    {
+      "name": "link1",
+      "ply": "meshes/link1.ply",
+      "stl": "meshes/link1.stl",
+      "frame": 1,
+      "triangles": 6156,
+      "sub_meshes": 12
+    },
+    {
+      "name": "link2",
+      "ply": "meshes/link2.ply",
+      "stl": "meshes/link2.stl",
+      "frame": 2,
+      "triangles": 3778,
+      "sub_meshes": 1
+    },
+    {
+      "name": "link3",
+      "ply": "meshes/link3.ply",
+      "stl": "meshes/link3.stl",
+      "frame": 3,
+      "triangles": 6500,
+      "sub_meshes": 22
+    },
+    {
+      "name": "link4",
+      "ply": "meshes/link4.ply",
+      "stl": "meshes/link4.stl",
+      "frame": 4,
+      "triangles": 1264,
+      "sub_meshes": 1
+    },
+    {
+      "name": "link5",
+      "ply": "meshes/link5.ply",
+      "stl": "meshes/link5.stl",
+      "frame": 5,
+      "triangles": 2302,
+      "sub_meshes": 5
+    },
+    {
+      "name": "link6",
+      "ply": "meshes/link6.ply",
+      "stl": "meshes/link6.stl",
+      "frame": 6,
+      "triangles": 1062,
+      "sub_meshes": 1
+    },
+    {
+      "name": "balancer_cylinder",
+      "ply": "meshes/balancer_cylinder.ply",
+      "stl": "meshes/balancer_cylinder.stl",
+      "frame": 2,
+      "triangles": 2606,
+      "sub_meshes": 1
+    },
+    {
+      "name": "balancer_rod",
+      "ply": "meshes/balancer_rod.ply",
+      "stl": "meshes/balancer_rod.stl",
+      "frame": 3,
+      "triangles": 328,
+      "sub_meshes": 1
+    }
+  ]
+}

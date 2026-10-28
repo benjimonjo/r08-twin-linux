@@ -24,7 +24,12 @@ SETTING_DEFS = [   # key, label, low, high, step
 ]
 KEYMAP = {"q": "X+", "a": "X-", "w": "Y+", "s": "Y-", "e": "Z+", "d": "Z-",
           "u": "Xa+", "j": "Xa-", "i": "Ya+", "k": "Ya-", "o": "Za+", "l": "Za-"}
-NEEDED_BUTTONS = [f"{a}{s}" for a in AXES for s in "+-"] + ["Step+", "Step-", "Abort"]
+NEEDED_BUTTONS = [f"{a}{s}" for a in AXES for s in "+-"] + [
+    "Step+", "Step-", "Camera Step+", "Camera Step-",
+    "Abort", "Backup", "Safe J23", "Safe J456",
+    "Up", "Down", "Left", "Right", "Zoom+", "Zoom-",
+    "Reset Camera", "Switch Camera",
+]
 
 HELP_TEXT = """Getting started
   1. Setup \u203a Run full setup.  Drag a box round the six numbers, then click the jog-panel buttons it asks for.

@@ -29,7 +29,7 @@ from . import digits
 from .picker import ALL_KEYS, STAGE_DEFS, BUTTON_KEYS, compute_buttons
 from .inputs import HAVE_PYNPUT
 from .widgets import NEEDED_BUTTONS, SETTING_DEFS, fmt_pos, fmt_ang
-from .planner import plan_presses, step_value
+from .planner import Press, plan_presses, step_value
 from .wayland_input import WaylandPointer
 from .github_updater import check_for_updates, install_update
 from .gpu_usage import GpuUsageMonitor
@@ -84,12 +84,73 @@ class UpdateWorker(QtCore.QThread):
             self.finished_result.emit(False, str(exc))
 
 
+class WorkspaceScanWorker(QtCore.QThread):
+    finished_result = QtCore.Signal(bool, object)
+
+    def __init__(self, sample_count=20000, parent=None):
+        super().__init__(parent)
+        self.sample_count = sample_count
+
+    def run(self):
+        try:
+            self.finished_result.emit(True, K.workspace_bounds(self.sample_count))
+        except Exception as exc:
+            self.finished_result.emit(False, str(exc))
+
+
 class ButtonPreview(QtWidgets.QLabel):
     clicked = QtCore.Signal(float, float)
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             self.clicked.emit(event.position().x(), event.position().y())
+
+
+class CameraCalibrationDialog(QtWidgets.QDialog):
+    def __init__(self, parent, image, points):
+        super().__init__(parent)
+        self.setWindowTitle("Calibrate camera projection")
+        self.points = points
+        self.image_points = []
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel(
+            "Click the visible robot landmarks in the listed order. Use at least six landmarks; "
+            "the first landmark is the base, followed by J1 through J6, flange, and tool tip."))
+        self.preview = ButtonPreview()
+        rgb = np.ascontiguousarray(image[:, :, :3])
+        h, w = rgb.shape[:2]
+        self.source_width, self.source_height = w, h
+        qimg = QtGui.QImage(rgb.data, w, h, w * 3, QtGui.QImage.Format.Format_RGB888).copy()
+        self.pixmap = QtGui.QPixmap.fromImage(qimg).scaled(
+            1000, 650, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation)
+        self.preview.setPixmap(self.pixmap)
+        self.preview.setFixedSize(self.pixmap.size())
+        self.preview.clicked.connect(self._clicked)
+        layout.addWidget(self.preview, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh()
+
+    def _clicked(self, x, y):
+        if len(self.image_points) >= len(self.points):
+            return
+        self.image_points.append([
+            x * self.source_width / self.pixmap.width(),
+            y * self.source_height / self.pixmap.height(),
+        ])
+        self._refresh()
+
+    def _refresh(self):
+        next_name = self.points[len(self.image_points)][0] if len(self.image_points) < len(self.points) else "complete"
+        self.status.setText(f"Landmark {len(self.image_points) + 1}/{len(self.points)}: {next_name}")
 
 
 class ButtonReviewDialog(QtWidgets.QDialog):
@@ -185,7 +246,10 @@ def detect_panel_buttons(capture, button_region=None):
     blue = cv2.inRange(hsv, np.array([88, 55, 65], np.uint8), np.array([140, 255, 255], np.uint8))
     blue = cv2.morphologyEx(blue, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     contours, _ = cv2.findContours(blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    button_config = "--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-"
+    button_config = "--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-"
+    color_ocr_labels = {f"{axis}{sign}" for axis in AXES for sign in "+-"} | {
+        "Step+", "Step-", "Camera Step+", "Camera Step-",
+        "Abort", "Backup", "Safe J23", "Safe J456"}
     for contour in contours:
         x, y, w, h = cv2.boundingRect(contour)
         if w < 12 or h < 8 or w * h < 120 or w / max(1, h) > 8:
@@ -200,7 +264,7 @@ def detect_panel_buttons(capture, button_region=None):
         for variant in variants:
             label = pytesseract.image_to_string(variant, config=button_config, timeout=2)
             label = re.sub(r"[^A-Z+\-]", "", label.upper().replace("−", "-").replace("–", "-"))
-            if label in NEEDED_BUTTONS:
+            if label in color_ocr_labels:
                 found[label] = ([monitor["left"] + x + w / 2, monitor["top"] + y + h / 2], 100)
                 break
 
@@ -220,6 +284,129 @@ def detect_panel_buttons(capture, button_region=None):
             continue
         controls.append((x, y, w, h, x + w / 2, y + h / 2))
 
+    def row_groups(items):
+        groups = []
+        for item in sorted(items, key=lambda value: value[5]):
+            for group in groups:
+                if abs(item[5] - np.mean([x[5] for x in group])) <= max(item[3], 12) * 0.65:
+                    group.append(item)
+                    break
+            else:
+                groups.append([item])
+        return [sorted(group, key=lambda value: value[4]) for group in groups]
+
+    # The panel layout is regular even when OCR is poor: position and angle
+    # each contain two rows of three colored buttons. Use those rows as a
+    # structural fallback and reserve OCR for the irregular jog controls.
+    grid_rows = [group for group in row_groups(controls) if len(group) >= 3]
+    if len(grid_rows) >= 2:
+        grid_rows.sort(key=lambda group: np.mean([x[5] for x in group]))
+        grid_floor = 0
+        def remember(name, item):
+            point = [monitor["left"] + item[4], monitor["top"] + item[5]]
+            found[name] = (point, 110)
+
+        for plus_names, minus_names in (
+            (("X+", "Y+", "Z+"), ("X-", "Y-", "Z-")),
+            (("Xa+", "Ya+", "Za+"), ("Xa-", "Ya-", "Za-")),
+        ):
+            if not grid_rows:
+                break
+            plus = grid_rows.pop(0)
+            if len(plus) < 3:
+                continue
+            grid_floor = max(grid_floor, max(x[5] for x in plus))
+            for name, item in zip(plus_names, plus[:3]):
+                remember(name, item)
+                # The negative controls use the same x positions and size,
+                # but are dark gray and therefore absent from the color mask.
+                minus = (item[0], item[1] + item[3] + 8, item[2], item[3],
+                         item[4], item[5] + item[3] + 8)
+                remember(minus_names[plus_names.index(name)], minus)
+
+    # Camera controls use the same three-column layout as the robot blocks.
+    # Their lower row is usually dark gray, so infer it from the visible
+    # Up/Right/Zoom+ row.
+    camera_top = None
+    if grid_rows:
+        camera_top = grid_rows.pop(0)
+        if len(camera_top) >= 3:
+            for name, item in zip(("Up", "Right", "Zoom+"), camera_top[:3]):
+                remember(name, item)
+                minus = (item[0], item[1] + item[3] + 8, item[2], item[3],
+                         item[4], item[5] + item[3] + 8)
+                lower_name = {"Up": "Down", "Right": "Left", "Zoom+": "Zoom-"}[name]
+                remember(lower_name, minus)
+            camera_bottom_y = camera_top[0][5] + camera_top[0][3] + 8
+            switch_candidates = [
+                item for item in controls
+                if camera_bottom_y + 20 < item[5] < camera_bottom_y + 80
+            ]
+            if switch_candidates:
+                remember("Switch Camera", min(switch_candidates, key=lambda item: item[5]))
+            # Reset Camera is a dark button aligned with the lower camera row.
+            last = camera_top[2]
+            reset = (last[0], last[1] + last[3] + 8, 110, last[3],
+                     last[4] + last[2] / 2 + 48 + 55, camera_bottom_y)
+            remember("Reset Camera", reset)
+
+    camera_section_top = camera_top[0][1] if camera_top else float("inf")
+    special_rows = [
+        group for group in row_groups(controls)
+        if len(group) in (1, 2)
+        and np.mean([x[5] for x in group]) > grid_floor
+        and np.mean([x[5] for x in group]) < camera_section_top - 12
+    ]
+    special_rows.sort(key=lambda group: np.mean([x[5] for x in group]))
+    if special_rows:
+        step_row = next((group for group in special_rows if len(group) == 2), None)
+        if step_row:
+            remember("Step+", step_row[0]); remember("Step-", step_row[1])
+        abort_row = next((group for group in special_rows if len(group) == 1), None)
+        if abort_row:
+            item = abort_row[0]
+            remember("Abort", item)
+
+    if "Step+" not in found and "Step-" not in found:
+        arm_step_candidates = [
+            item for item in controls
+            if grid_floor < item[5] < camera_section_top - 12
+            and item[2] >= 50 and item[3] >= 24
+        ]
+        if arm_step_candidates:
+            item = min(arm_step_candidates, key=lambda value: value[5])
+            half = item[2] / 2
+            row_height = min(item[3], 22)
+            plus = (item[0], item[1], half - 2, row_height,
+                    item[0] + (half - 2) / 2, item[1] + row_height / 2)
+            minus_x = item[0] + half + 2
+            minus = (minus_x, item[1], half - 2, row_height,
+                     minus_x + (half - 2) / 2, item[1] + row_height / 2)
+            remember("Step+", plus)
+            remember("Step-", minus)
+
+    # The two camera step buttons can touch and become one saturated contour.
+    # Split that wide row rather than allowing OCR to merge both labels into
+    # the robot Step+ / Step- entries.
+    camera_y = max((point[1] for name, point in found.items()
+                    if name in ("Down", "Left", "Zoom-")), default=0)
+    camera_step_rows = [
+        item for item in controls
+        if item[5] > camera_y + 35 and item[2] >= 45 and item[3] <= 35
+    ]
+    if camera_step_rows:
+        item = min(camera_step_rows, key=lambda value: value[5])
+        half = item[2] / 2
+        plus = (item[0], item[1], half - 2, item[3],
+                item[0] + (half - 2) / 2, item[5])
+        minus_x = item[0] + half + 2
+        minus = (minus_x, item[1], half - 2, item[3],
+                 minus_x + (half - 2) / 2, item[5])
+        remember("Camera Step+", plus)
+        remember("Camera Step-", minus)
+
+    # OCR identifies the two irregular camera actions; a color-only fallback
+    # uses their stable placement below the camera grid.
     # Run OCR on both contrast-equalized grayscale and adaptive-thresholded
     # images. The labels are tiny and white text can disappear in a plain
     # grayscale pass, especially on blue and green fills.
@@ -228,7 +415,7 @@ def detect_panel_buttons(capture, button_region=None):
     adaptive = cv2.adaptiveThreshold(clahe, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                      cv2.THRESH_BINARY, 31, 7)
     text_candidates = []
-    normalize = lambda s: re.sub(r"[^a-z+\-]", "", s.lower().replace("−", "-").replace("–", "-"))
+    normalize = lambda s: re.sub(r"[^a-z0-9+\-]", "", s.lower().replace("−", "-").replace("–", "-"))
     labels = {normalize(name): name for name in NEEDED_BUTTONS}
     for source in (clahe, adaptive):
         enlarged = cv2.resize(source, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
@@ -272,8 +459,48 @@ def detect_panel_buttons(capture, button_region=None):
             point = [monitor["left"] + bx, monitor["top"] + by]
         else:
             point = [monitor["left"] + cx, monitor["top"] + cy]
+        if name == "Reset Camera":
+            # This control is dark gray, so its label is the most reliable
+            # location when no colored body is available for association.
+            point = [monitor["left"] + cx, monitor["top"] + cy]
+        if name in {"Abort", "Backup", "Safe J23", "Safe J456"}:
+            # These labels are also present in the robot-mode card and its
+            # buttons are dark, so the OCR text center is safer than associating
+            # the label with an unrelated saturated control.
+            point = [monitor["left"] + cx, monitor["top"] + cy]
+        if name in {"Step+", "Step-"} and cy >= camera_section_top:
+            # Generic Step labels in the camera section must not replace the
+            # arm step buttons. Camera step controls have their own names.
+            continue
         # Prefer the color-crop result (confidence 100) when available.
         if name not in found or confidence > found[name][1]: found[name] = (point, confidence)
+
+    # The compact safe-position card often renders both labels as one OCR
+    # token, and the J in J456 may be read as a 1. Re-read that card at a
+    # larger scale so the two distinct safe buttons cannot collapse together.
+    if "Backup" in found:
+        backup_y = int(found["Backup"][1] - monitor["top"])
+        y0 = max(0, backup_y - 28)
+        lower = gray[y0:]
+        enlarged = cv2.resize(lower, None, fx=6, fy=6, interpolation=cv2.INTER_CUBIC)
+        data = pytesseract.image_to_data(
+            enlarged,
+            config="--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            output_type=pytesseract.Output.DICT,
+            timeout=8,
+        )
+        for i, word in enumerate(data["text"]):
+            token = normalize(word)
+            if token not in {"safej23", "safej456", "safej1456"}:
+                continue
+            left, top = int(data["left"][i]), int(data["top"][i])
+            width, height = int(data["width"][i]), int(data["height"][i])
+            name = "Safe J23" if token == "safej23" else "Safe J456"
+            found[name] = (
+                [monitor["left"] + (left + width / 2) / 6,
+                 monitor["top"] + y0 + (top + height / 2) / 6],
+                120,
+            )
     return monitor, image, {name: value[0] for name, value in found.items()}
 
 
@@ -378,11 +605,22 @@ class ButtonRecognitionWorker(QtCore.QThread):
 
 class CaptureInitWorker(QtCore.QThread):
     finished_result = QtCore.Signal(bool, object)
-    def __init__(self, separate=False, source=None, parent=None):
-        super().__init__(parent); self.separate, self.source = separate, source
+    def __init__(self, separate=False, source=None, restore_token=None, parent=None):
+        super().__init__(parent)
+        self.separate, self.source, self.restore_token = separate, source, restore_token
     def run(self):
         try:
-            capture = new_mss(separate=self.separate, source=self.source or ("monitor" if self.separate else None))
+            try:
+                capture = new_mss(
+                    separate=self.separate,
+                    source=self.source or ("monitor" if self.separate else None),
+                    restore_token=self.restore_token)
+            except Exception:
+                if not self.restore_token:
+                    raise
+                capture = new_mss(
+                    separate=self.separate,
+                    source=self.source or ("monitor" if self.separate else None))
             self.finished_result.emit(True, capture)
         except Exception as exc:
             self.finished_result.emit(False, str(exc))
@@ -613,6 +851,7 @@ class QtApp:
         self.wayland_pointer = None; self.automated_run = False
         self.auto_next_allowed = 0.0; self.auto_verify_deadline = 0.0
         self.update_worker = None
+        self.workspace_worker = None
         self.image_label = None; self.last_tick = clock(); self.log_entries = []
         self.fps = 0.0; self._fps_count = 0; self._fps_time = clock()
         self.gpu_monitor = GpuUsageMonitor(); self.gpu_monitor.start()
@@ -645,7 +884,8 @@ class QtApp:
         reloadb = QtWidgets.QPushButton("Reload scripts (dev)")
         reloadb.setToolTip("Save settings and restart R08 to load the current Python files")
         reloadb.clicked.connect(lambda: self._reload_application()); header.addWidget(reloadb)
-        split = QtWidgets.QSplitter(); root.addWidget(split, 1)
+        tabs = QtWidgets.QTabWidget(); root.addWidget(tabs, 1)
+        split = QtWidgets.QSplitter(); tabs.addTab(split, "Live twin")
         left = QtWidgets.QWidget(); ll = QtWidgets.QVBoxLayout(left); ll.setContentsMargins(0, 0, 4, 0)
         self.image_label = SceneLabel("Open Setup to select the number table")
         self.image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -661,6 +901,10 @@ class QtApp:
         self.gaussian_splats = QtWidgets.QCheckBox("Gaussian splat view")
         self.gaussian_splats.setToolTip("Render mapped objects as soft splats and show the active Discord camera as Gaussian image points")
         self.gaussian_splats.toggled.connect(self._mark_dirty); views.addWidget(self.gaussian_splats)
+        self.camera_texture = QtWidgets.QCheckBox("Map camera onto robot")
+        self.camera_texture.setToolTip("Show the live camera texture projected onto the reconstructed robot after calibration.")
+        self.camera_texture.setChecked(bool(self.cfg.get("camera_texture_enabled", False)))
+        self.camera_texture.toggled.connect(self._camera_texture_toggled); views.addWidget(self.camera_texture)
         self.camera_source = QtWidgets.QComboBox(); self.camera_source.addItems(["Stream camera 1", "Stream camera 2"])
         self.camera_source.setToolTip("Select the label for the camera currently selected in the Discord stream")
         self.camera_source.currentIndexChanged.connect(self._mark_dirty); views.addWidget(self.camera_source)
@@ -680,20 +924,31 @@ class QtApp:
         status = self._group("Controls"); form = QtWidgets.QVBoxLayout(status)
         self.control_label = QtWidgets.QLabel("Guided panel moves are available in manual-confirm mode. The app cannot click the robot panel through Wayland."); self.control_label.setWordWrap(True); form.addWidget(self.control_label)
         self.button_state = QtWidgets.QLabel("Panel buttons not set up"); form.addWidget(self.button_state)
-        setupb = QtWidgets.QPushButton("Set up panel buttons"); setupb.clicked.connect(lambda: self.run_setup([k for k in ALL_KEYS if k != "region"]))
-        form.addWidget(setupb); sl.addWidget(status)
-        camera_setup = QtWidgets.QPushButton("Select Discord camera video")
-        camera_setup.clicked.connect(lambda: self.run_setup(["camera_region"]))
-        form.addWidget(camera_setup)
-        button_capture_setup = QtWidgets.QPushButton("Select movement-button screen share")
-        button_capture_setup.setToolTip("Opens a separate desktop screen-share session for robot controls, independent of the camera/video capture")
-        button_capture_setup.clicked.connect(lambda: self._reselect_button_screen_share("monitor"))
-        form.addWidget(button_capture_setup)
-        button_window_setup = QtWidgets.QPushButton("Select movement-button window")
-        button_window_setup.setToolTip("Choose the app window containing the movement controls in the Wayland portal")
-        button_window_setup.clicked.connect(lambda: self._reselect_button_screen_share("window"))
-        form.addWidget(button_window_setup)
-        self.recognize_button = QtWidgets.QPushButton("Recognize panel buttons automatically…"); self.recognize_button.clicked.connect(self._recognize_buttons); form.addWidget(self.recognize_button)
+        sl.addWidget(status)
+        camera_controls = self._group("Panel camera controls")
+        camera_grid = QtWidgets.QGridLayout(camera_controls)
+        for index, name in enumerate(("Up", "Down", "Left", "Right", "Zoom+", "Zoom-")):
+            button = QtWidgets.QPushButton(name)
+            button.clicked.connect(lambda checked=False, n=name: self._panel_camera_action(n))
+            camera_grid.addWidget(button, index // 3, index % 3)
+        for column, name in enumerate(("Camera Step+", "Camera Step-")):
+            button = QtWidgets.QPushButton(name)
+            button.clicked.connect(lambda checked=False, n=name: self._panel_camera_action(n))
+            camera_grid.addWidget(button, 3, column)
+        reset_camera = QtWidgets.QPushButton("Reset Camera")
+        reset_camera.clicked.connect(lambda: self._panel_camera_action("Reset Camera"))
+        camera_grid.addWidget(reset_camera, 2, 0, 1, 2)
+        switch_camera = QtWidgets.QPushButton("Switch Camera")
+        switch_camera.clicked.connect(lambda: self._panel_camera_action("Switch Camera"))
+        camera_grid.addWidget(switch_camera, 2, 2)
+        sl.addWidget(camera_controls)
+        safety = self._group("Panel safety controls")
+        safety_grid = QtWidgets.QHBoxLayout(safety)
+        for name in ("Abort", "Backup", "Safe J23", "Safe J456"):
+            button = QtWidgets.QPushButton(name)
+            button.clicked.connect(lambda checked=False, n=name: self._panel_camera_action(n))
+            safety_grid.addWidget(button)
+        sl.addWidget(safety)
         movement = self._group("Movement options"); ml = QtWidgets.QVBoxLayout(movement)
         self.step_combo = QtWidgets.QComboBox()
         for pos, ang in STEP_LEVELS: self.step_combo.addItem(f"{pos:g} in / {ang:g}°")
@@ -769,9 +1024,323 @@ class QtApp:
         teach = QtWidgets.QPushButton("Teach digits…"); teach.clicked.connect(self._teach_digits); dl.addWidget(teach); sl.addWidget(digit)
         debug = QtWidgets.QPushButton("Save OCR snapshot"); debug.clicked.connect(self._save_ocr_snapshot); dl.addWidget(debug)
         sl.addStretch(); scroll.setWidget(side); split.addWidget(scroll); split.setStretchFactor(0, 3); split.setStretchFactor(1, 1)
+        self._build_config_tab(tabs)
         self.window.menuBar().setNativeMenuBar(True)
 
     def _mark_dirty(self, *_): self.dirty = True
+
+    def _capture_restore_token(self, separate, source=None):
+        tokens = self.cfg.get("pipewire_restore_tokens", {}) or {}
+        role = ("panel_" + (source or self.cfg.get("button_capture_source", "monitor"))
+                if separate else "primary")
+        return tokens.get(role)
+
+    def _save_capture_restore_token(self, capture, separate, source=None):
+        token = getattr(capture, "new_restore_token", None)
+        if not token:
+            return
+        tokens = self.cfg.get("pipewire_restore_tokens", {}) or {}
+        role = ("panel_" + (source or self.cfg.get("button_capture_source", "monitor"))
+                if separate else "primary")
+        tokens[role] = str(token)
+        self.cfg.set("pipewire_restore_tokens", tokens)
+        self.cfg.save()
+
+    def _camera_texture_toggled(self, enabled):
+        self.cfg.set("camera_texture_enabled", bool(enabled))
+        self.cfg.save()
+        self.dirty = True
+
+    def _clear_pipewire_tokens(self):
+        answer = QtWidgets.QMessageBox.question(
+            self.window, "Clear PipeWire tokens",
+            "Forget all saved PipeWire screen-share permissions? The desktop chooser will appear again the next time a capture is opened.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self.cfg.set("pipewire_restore_tokens", {})
+        self.cfg.save()
+        for attr in ("pointer_capture", "button_capture", "capture"):
+            capture = getattr(self, attr, None)
+            if capture is not None:
+                try:
+                    capture.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        if self.wayland_pointer is not None:
+            self.wayland_pointer.close()
+            self.wayland_pointer = None
+        self.log("Saved PipeWire screen-share tokens cleared.")
+        self.debug_camera_status.setText("Saved PipeWire tokens cleared; the next capture will ask again.")
+
+    def _refresh_debug_calibration_status(self):
+        calibration = self.cfg.get("camera_texture")
+        if not calibration:
+            self.debug_calibration_status.setText("Camera projection: not calibrated.")
+            return
+        names = calibration.get("landmarks", [])
+        self.debug_calibration_status.setText(
+            f"Camera projection: calibrated with {len(names)} landmarks "
+            f"({', '.join(names) if names else 'no landmark names saved'}).")
+
+    def _camera_landmarks(self, q):
+        info = self.robot_mesh.update(np.asarray(q, float))
+        joints = [point.copy() for point in info.joints]
+        # FANUC's J4 wrist-roll axis is in the wrist cluster, next to J5.
+        # The raw DH origin at index 3 is the wrist-link offset, not the
+        # visible J4 center used for camera calibration.
+        joints[3] = joints[4].copy()
+        return [np.zeros(3)] + joints + [
+            info.flange.copy(), info.tip.copy()]
+
+    def _update_debug_camera_view(self):
+        if not hasattr(self, "debug_camera_image"):
+            return
+        frame = getattr(self, "camera_frame", None)
+        if frame is None or not frame.size:
+            return
+        image = frame.copy()
+        calibration = self.cfg.get("camera_texture") or {}
+        if calibration.get("camera_matrix") and calibration.get("rvec") and calibration.get("tvec"):
+            points = np.asarray(self._camera_landmarks(self.q_vis), np.float32)
+            count = len(calibration.get("landmarks", []))
+            projected, _ = cv2.projectPoints(
+                points[:count], np.asarray(calibration["rvec"], float),
+                np.asarray(calibration["tvec"], float),
+                np.asarray(calibration["camera_matrix"], float), np.zeros(5))
+            marker_points = projected.reshape(-1, 2)
+        else:
+            marker_points = calibration.get("image_points", [])
+        for point in marker_points:
+            x, y = np.rint(point).astype(int)
+            if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
+                cv2.drawMarker(image, (x, y), (0, 255, 0), cv2.MARKER_CROSS, 18, 2)
+        h, w = image.shape[:2]
+        qimg = QtGui.QImage(np.ascontiguousarray(image).data, w, h, w * 3,
+                            QtGui.QImage.Format.Format_RGB888).copy()
+        self.debug_camera_image.setPixmap(
+            QtGui.QPixmap.fromImage(qimg).scaled(
+                900, 340, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation))
+        self.debug_camera_status.setText(
+            f"Live camera frame: {w} × {h} px  ·  updated {time.strftime('%H:%M:%S')}")
+
+    def _calibrate_camera_texture(self):
+        camera_region = self.cfg.get("camera_region")
+        if not camera_region:
+            QtWidgets.QMessageBox.warning(self.window, "Camera calibration",
+                                          "Select the Discord camera video region first.")
+            return
+        try:
+            if self.capture is None:
+                self.capture = new_mss()
+            shot = np.asarray(self.capture.grab(camera_region))
+            landmark_points = self._camera_landmarks(self.q_vis)
+            landmarks = list(zip(
+                ["Base", "J1", "J2", "J3", "J4", "J5", "J6", "Flange", "Tool tip"],
+                landmark_points))
+            dialog = CameraCalibrationDialog(self.window, shot, landmarks)
+            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                return
+            if len(dialog.image_points) < 6:
+                QtWidgets.QMessageBox.warning(self.window, "Camera calibration",
+                                              "Select at least six robot landmarks.")
+                return
+            object_points = np.asarray([point for _, point in landmarks[:len(dialog.image_points)]], np.float32)
+            image_points = np.asarray(dialog.image_points, np.float32)
+            height, width = shot.shape[:2]
+            focal = width / (2.0 * math.tan(math.radians(60.0) / 2.0))
+            camera_matrix = np.array([[focal, 0, width / 2.0],
+                                      [0, focal, height / 2.0],
+                                      [0, 0, 1]], np.float64)
+            ok, rvec, tvec = cv2.solvePnP(
+                object_points, image_points, camera_matrix, np.zeros(5), flags=cv2.SOLVEPNP_ITERATIVE)
+            if not ok:
+                raise RuntimeError("OpenCV could not solve the camera pose from these points.")
+            self.cfg.set("camera_texture", {
+                "camera_matrix": camera_matrix.tolist(),
+                "rvec": rvec.reshape(-1).tolist(),
+                "tvec": tvec.reshape(-1).tolist(),
+                "image_size": [width, height],
+                "landmarks": [name for name, _ in landmarks[:len(dialog.image_points)]],
+                "image_points": np.asarray(dialog.image_points, float).tolist(),
+                "calibration_q": self.q_vis.tolist(),
+            })
+            self.cfg.set("camera_texture_enabled", True)
+            self.cfg.save()
+            self.camera_texture.setChecked(True)
+            self._refresh_debug_calibration_status()
+            self.log("Camera texture calibrated from robot landmarks.")
+            self.dirty = True
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self.window, "Camera calibration", str(exc))
+
+    def _build_config_tab(self, tabs):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(10)
+        title = QtWidgets.QLabel("Configuration")
+        title.setStyleSheet(f"color:{C.yellow};font-size:18px;font-weight:700")
+        layout.addWidget(title)
+        layout.addWidget(QtWidgets.QLabel(
+            "Run any setup step again here. Screen regions and calibrated panel buttons are saved in the current configuration."))
+
+        capture = self._group("Capture sources")
+        capture_layout = QtWidgets.QGridLayout(capture)
+        capture_layout.addWidget(QtWidgets.QLabel("Primary pose/step capture"), 0, 0)
+        primary = QtWidgets.QPushButton("Choose monitor or window")
+        primary.clicked.connect(lambda: self._setup_menu())
+        capture_layout.addWidget(primary, 0, 1)
+        pose = QtWidgets.QPushButton("Select number table")
+        pose.clicked.connect(lambda: self.run_setup(["region"]))
+        capture_layout.addWidget(pose, 1, 0)
+        camera = QtWidgets.QPushButton("Select Discord camera video")
+        camera.clicked.connect(lambda: self.run_setup(["camera_region"]))
+        capture_layout.addWidget(camera, 1, 1)
+        shared_note = QtWidgets.QLabel(
+            "The number table and Discord camera region share the primary capture stream when they are on the same screen share.")
+        shared_note.setWordWrap(True)
+        shared_note.setProperty("muted", True)
+        capture_layout.addWidget(shared_note, 3, 0, 1, 2)
+        clear_tokens = QtWidgets.QPushButton("Clear saved PipeWire tokens")
+        clear_tokens.setToolTip("Forget saved screen-share permissions so the desktop chooser appears next time.")
+        clear_tokens.clicked.connect(self._clear_pipewire_tokens)
+        capture_layout.addWidget(clear_tokens, 4, 0, 1, 2)
+        calibrate = QtWidgets.QPushButton("Calibrate camera using robot points")
+        calibrate.clicked.connect(self._calibrate_camera_texture)
+        capture_layout.addWidget(calibrate, 5, 0, 1, 2)
+        layout.addWidget(capture)
+
+        panel = self._group("Movement panel")
+        panel_layout = QtWidgets.QGridLayout(panel)
+        actions = [
+            ("Select panel screen share", lambda: self._reselect_button_screen_share("monitor")),
+            ("Select panel window", lambda: self._reselect_button_screen_share("window")),
+            ("Run full setup", lambda: self.run_setup(ALL_KEYS)),
+            ("Set up all panel buttons", lambda: self.run_setup(BUTTON_KEYS)),
+            ("Recognize panel buttons", self._recognize_buttons),
+            ("Select step-size text", lambda: self.run_setup(["step_label"])),
+            ("Select IDLE/MOVING banner", lambda: self.run_setup(["status"])),
+            ("Set status and step text", lambda: self.run_setup(["status", "step_label"])),
+        ]
+        for index, (label, callback) in enumerate(actions):
+            button = QtWidgets.QPushButton(label)
+            button.clicked.connect(callback)
+            panel_layout.addWidget(button, index // 2, index % 2)
+        layout.addWidget(panel)
+
+        workspace = self._group("Reachable workspace")
+        workspace_layout = QtWidgets.QVBoxLayout(workspace)
+        self.workspace_label = QtWidgets.QLabel("No workspace scan has been run.")
+        self.workspace_label.setWordWrap(True)
+        workspace_layout.addWidget(self.workspace_label)
+        scan = QtWidgets.QPushButton("Find arm reach limits")
+        scan.setToolTip("Samples the configured joint limits and estimates the TCP bounding box.")
+        scan.clicked.connect(self._scan_workspace)
+        workspace_layout.addWidget(scan)
+        layout.addWidget(workspace)
+
+        ocr = self._group("OCR snapshots")
+        ocr_layout = QtWidgets.QVBoxLayout(ocr)
+        ocr_layout.addWidget(QtWidgets.QLabel(
+            "Capture the current number table to inspect the region and each cell used by the OCR reader."))
+        snapshot_row = QtWidgets.QHBoxLayout()
+        snapshot = QtWidgets.QPushButton("Capture OCR snapshot")
+        snapshot.clicked.connect(self._save_ocr_snapshot)
+        snapshot_row.addWidget(snapshot)
+        self.ocr_snapshot_status = QtWidgets.QLabel("No snapshot captured.")
+        self.ocr_snapshot_status.setProperty("muted", True)
+        ocr_layout.addLayout(snapshot_row)
+        self.ocr_snapshot_status.setWordWrap(True)
+        ocr_layout.addWidget(self.ocr_snapshot_status)
+        self.ocr_region_preview = QtWidgets.QLabel("Region preview")
+        self.ocr_region_preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.ocr_region_preview.setMinimumHeight(70)
+        self.ocr_region_preview.setMaximumHeight(120)
+        self.ocr_region_preview.setStyleSheet("background:#0f1115;border:1px solid #303641")
+        ocr_layout.addWidget(self.ocr_region_preview)
+        self.ocr_cell_previews = []
+        cell_grid = QtWidgets.QGridLayout()
+        for i, axis in enumerate(AXES):
+            cell = QtWidgets.QLabel(f"{axis}\nNo image")
+            cell.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            cell.setMinimumSize(125, 54)
+            cell.setMaximumHeight(78)
+            cell.setStyleSheet("background:#0f1115;border:1px solid #303641")
+            self.ocr_cell_previews.append(cell)
+            cell_grid.addWidget(cell, i // 3, i % 3)
+        ocr_layout.addLayout(cell_grid)
+        layout.addWidget(ocr)
+        self._update_ocr_snapshot_preview()
+
+        debug = self._group("Debug view")
+        debug_layout = QtWidgets.QVBoxLayout(debug)
+        self.debug_camera_preview = QtWidgets.QCheckBox("Show live camera preview")
+        self.debug_camera_preview.setToolTip("Capture the configured Discord camera region and show it here for calibration diagnostics.")
+        self.debug_camera_preview.toggled.connect(self._mark_dirty)
+        debug_layout.addWidget(self.debug_camera_preview)
+        self.debug_camera_status = QtWidgets.QLabel("Camera preview is disabled.")
+        self.debug_camera_status.setWordWrap(True)
+        debug_layout.addWidget(self.debug_camera_status)
+        self.debug_camera_image = QtWidgets.QLabel("No camera frame")
+        self.debug_camera_image.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.debug_camera_image.setMinimumHeight(120)
+        self.debug_camera_image.setMaximumHeight(360)
+        self.debug_camera_image.setStyleSheet("background:#0f1115;border:1px solid #303641")
+        debug_layout.addWidget(self.debug_camera_image)
+        self.debug_calibration_status = QtWidgets.QLabel()
+        self.debug_calibration_status.setWordWrap(True)
+        debug_layout.addWidget(self.debug_calibration_status)
+        layout.addWidget(debug)
+        self._refresh_debug_calibration_status()
+        layout.addStretch()
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        tabs.addTab(scroll, "Configuration")
+
+    def _scan_workspace(self):
+        if self.workspace_worker and self.workspace_worker.isRunning():
+            return
+        self.workspace_label.setText("Scanning joint limits… this may take a few seconds.")
+        self.workspace_worker = WorkspaceScanWorker(parent=self.window)
+        self.workspace_worker.finished_result.connect(self._workspace_scan_finished)
+        self.workspace_worker.start()
+
+    def _workspace_scan_finished(self, ok, result):
+        if not ok:
+            self.workspace_label.setText(f"Workspace scan failed: {result}")
+            self.log(f"Workspace scan failed: {result}")
+            return
+        lo = np.asarray(result["min_m"]) * 1000.0
+        hi = np.asarray(result["max_m"]) * 1000.0
+        radius = float(result["max_radius_m"]) * 1000.0
+        text = (f"Estimated TCP limits from {result['samples']:,} joint samples:\n"
+                f"X {lo[0]:+.0f} to {hi[0]:+.0f} mm, "
+                f"Y {lo[1]:+.0f} to {hi[1]:+.0f} mm, "
+                f"Z {lo[2]:+.0f} to {hi[2]:+.0f} mm\n"
+                f"Maximum sampled distance from base: {radius:.0f} mm.")
+        self.workspace_label.setText(text)
+        self.cfg.set("workspace_bounds", {
+            "min_m": np.asarray(result["min_m"]).tolist(),
+            "max_m": np.asarray(result["max_m"]).tolist(),
+            "max_radius_m": result["max_radius_m"],
+            "samples": result["samples"],
+        })
+        self.cfg.save()
+        self.log("Workspace reach limits estimated from joint-limit samples.")
+
+    def _panel_camera_action(self, name):
+        if self.guide_next.isEnabled() or self.automated_run:
+            self.log("A guided panel action is already running. Stop it first.")
+            return
+        self.guided_plan = [Press(name, kind="camera", verifiable=False, label=f"panel camera: {name}")]
+        self.guided_index = 0
+        self._start_guided_move()
 
     def _camera_preset(self, name):
         if name == "reset": self.cam.reset()
@@ -833,8 +1402,38 @@ class QtApp:
                 result = digits.read_cell(cell, i // 3, self.bank)
                 report.append(f"{AXES[i]:>2}: {result.text} (score {result.score:.2f})" if result else f"{AXES[i]:>2}: NOT READ")
             with open(os.path.join(DEBUG_DIR, "report.txt"), "w", encoding="utf-8") as out: out.write("\n".join(report) + "\n")
+            self._update_ocr_snapshot_preview(report)
             self.log(f"OCR snapshot saved in {DEBUG_DIR}")
         except Exception as exc: self.log(f"OCR snapshot failed: {exc}")
+
+    def _update_ocr_snapshot_preview(self, report=None):
+        if not hasattr(self, "ocr_region_preview"):
+            return
+        region_path = os.path.join(DEBUG_DIR, "region.png")
+        if not os.path.isfile(region_path):
+            return
+        region_pixmap = QtGui.QPixmap(region_path)
+        self.ocr_region_preview.setPixmap(
+            region_pixmap.scaled(720, 150, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                                 QtCore.Qt.TransformationMode.SmoothTransformation))
+        for i, axis in enumerate(AXES):
+            path = os.path.join(DEBUG_DIR, f"cell{i}_{axis}.png")
+            if not os.path.isfile(path):
+                continue
+            pixmap = QtGui.QPixmap(path)
+            self.ocr_cell_previews[i].setPixmap(
+                pixmap.scaled(220, 80, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                              QtCore.Qt.TransformationMode.SmoothTransformation))
+            self.ocr_cell_previews[i].setToolTip(path)
+        if report is None:
+            report_path = os.path.join(DEBUG_DIR, "report.txt")
+            if os.path.isfile(report_path):
+                with open(report_path, encoding="utf-8") as source:
+                    report = [line.strip() for line in source if line.strip()]
+        if report:
+            self.ocr_snapshot_status.setText("  ·  ".join(report))
+        else:
+            self.ocr_snapshot_status.setText(f"Snapshot files found in {DEBUG_DIR}")
 
     def _refresh_objects(self):
         self.object_list.clear()
@@ -1080,6 +1679,8 @@ class QtApp:
         self._show_guided_action()
 
     def _guided_action_verified(self, action, pose):
+        if not action.verifiable:
+            return True
         if action.kind == "jog" and pose is not None and self.guided_before is not None:
             delta = float(pose[action.axis] - self.guided_before[action.axis])
             if action.axis >= 3: delta = wrap180(delta)
@@ -1107,7 +1708,11 @@ class QtApp:
                 return
             self.capture_init_purpose = "automated_input"
             self.capture_init_worker = CaptureInitWorker(
-                separate=True, source=self.cfg.get("button_capture_source", "monitor"), parent=self.window)
+                separate=True,
+                source=self.cfg.get("button_capture_source", "monitor"),
+                restore_token=self._capture_restore_token(
+                    True, self.cfg.get("button_capture_source", "monitor")),
+                parent=self.window)
             self.capture_init_worker.finished_result.connect(self._capture_init_finished)
             self.capture_init_worker.start()
             self.log("Select the movement-button window in the screen-share prompt…" if window_source else
@@ -1118,7 +1723,10 @@ class QtApp:
                 self.log("Waiting for the current screen-share selection to finish before automated input.")
                 return
             self.capture_init_purpose = "automated_pointer"
-            self.capture_init_worker = CaptureInitWorker(separate=True, source="monitor", parent=self.window)
+            self.capture_init_worker = CaptureInitWorker(
+                separate=True, source="monitor",
+                restore_token=self._capture_restore_token(True, "monitor"),
+                parent=self.window)
             self.capture_init_worker.finished_result.connect(self._capture_init_finished)
             self.capture_init_worker.start()
             self.log("Select the monitor containing that window so R08 can map its controls to desktop clicks…")
@@ -1321,18 +1929,18 @@ class QtApp:
             return
         try:
             if getattr(self, "button_recognition_worker", None) and self.button_recognition_worker.isRunning(): return
-            self.recognize_button.setEnabled(False); self.recognize_button.setText("Recognizing labels…")
+            self.button_state.setText("Recognizing panel buttons…")
             self.button_recognition_worker = ButtonRecognitionWorker(
                 self.button_capture, self.cfg.get("button_region"),
                 self.cfg.get("button_capture_source", "monitor"), self.window)
             self.button_recognition_worker.finished_result.connect(self._button_recognition_finished)
             self.button_recognition_worker.start()
         except Exception as exc:
-            self.recognize_button.setEnabled(True); self.recognize_button.setText("Recognize panel buttons automatically…")
+            self.button_state.setText("Panel button recognition failed")
             QtWidgets.QMessageBox.warning(self.window, "Button recognition failed", str(exc))
 
     def _button_recognition_finished(self, ok, result):
-        self.recognize_button.setEnabled(True); self.recognize_button.setText("Recognize panel buttons automatically…")
+        self.button_state.setText("Panel buttons not set up" if not ok else "Panel buttons recognized")
         if not ok:
             QtWidgets.QMessageBox.warning(self.window, "Button recognition failed", str(result)); return
         self.button_capture, (monitor, image, detected) = result
@@ -1470,6 +2078,9 @@ class QtApp:
                 self.capture_init_worker = CaptureInitWorker(
                     separate=separate,
                     source=self.cfg.get("button_capture_source", "monitor") if separate else None,
+                    restore_token=self._capture_restore_token(
+                        separate,
+                        self.cfg.get("button_capture_source", "monitor") if separate else None),
                     parent=self.window)
                 self.capture_init_worker.finished_result.connect(self._capture_init_finished)
                 if separate and self.cfg.get("button_capture_source", "monitor") == "window":
@@ -1526,11 +2137,14 @@ class QtApp:
             return
         if purpose in ("setup_button", "automated_input"):
             self.button_capture = result
+            self._save_capture_restore_token(
+                result, True, self.cfg.get("button_capture_source", "monitor"))
             self.step_reader.set_capture(result)
         elif purpose == "automated_pointer":
             self.pointer_capture = result
         else:
             self.capture = result
+            self._save_capture_restore_token(result, False)
         if purpose in ("setup_button", "setup_stream"):
             keys = self.pending_setup_keys; self.pending_setup_keys = None
             if keys: self.run_setup(keys)
@@ -1636,20 +2250,24 @@ class QtApp:
         else:
             self.q_vis_velocity *= math.exp(-dt * 12.0)
         camera_region = self.cfg.get("camera_region")
-        if (self.gaussian_splats.isChecked() and camera_region and
+        if ((self.gaussian_splats.isChecked() or self.camera_texture.isChecked() or
+             self.debug_camera_preview.isChecked()) and camera_region and
                 now - getattr(self, "camera_frame_time", 0.0) >= 0.20 and
                 now - getattr(self, "camera_capture_error_time", 0.0) > 5.0):
             try:
                 if self.capture is None:
                     if not (self.capture_init_worker and self.capture_init_worker.isRunning()):
                         self.capture_init_purpose = "camera_capture"
-                        self.capture_init_worker = CaptureInitWorker(parent=self.window)
+                        self.capture_init_worker = CaptureInitWorker(
+                            restore_token=self._capture_restore_token(False),
+                            parent=self.window)
                         self.capture_init_worker.finished_result.connect(self._capture_init_finished)
                         self.capture_init_worker.start()
                 else:
                     shot = np.asarray(self.capture.grab(camera_region))
                     self.camera_frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2RGB)
                     self.camera_frame_time = now; self.dirty = True
+                    self._update_debug_camera_view()
             except Exception as exc:
                 if now - getattr(self, "camera_capture_error_time", 0.0) > 5:
                     self.camera_capture_error_time = now
@@ -1666,6 +2284,12 @@ class QtApp:
         if self.gaussian_splats.isChecked() and getattr(self, "camera_frame", None) is not None:
             hud["camera_view"] = self.camera_frame
             hud["camera_name"] = f"Discord camera {self.camera_source.currentIndex() + 1}"
+        calibration = self.cfg.get("camera_texture")
+        if (self.camera_texture.isChecked() and calibration and
+                getattr(self, "camera_frame", None) is not None):
+            hud["camera_view"] = self.camera_frame
+            hud["camera_texture"] = calibration
+            hud["camera_landmarks"] = self._camera_landmarks(self.q_vis)
         if snap.pose is not None: hud["tip_text"] = "  ".join(fmt_pos(snap.pose[i]) for i in range(3)) + " in"
         else: hud["msg"] = "Open Setup to select the number table"
         ghost_tris = ghost_tip = None; ghost_ok = True; ghost_col = hex_rgb(C.green)

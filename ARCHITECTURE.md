@@ -47,4 +47,4 @@ Test idea: render text with PIL into 150x52 cells (white on dark, noise, grid li
 * New robot part: add to `PART_DEFS`, assign `V[S["name"]] = ...` in `RobotMesh.update`.
 * New 3D object: build a soup (`model3d.solid_soup`) and append it to `tris` in `App._render`.
 * New 2D overlay item: `render.draw_overlay` (uses `View.project`).
-* Model accuracy: `kinematics.py` provides the joint chain; `step_importer.py` tessellates the complete supplied 165F STEP assembly; `model3d.py` renders the fused CAD envelope translated by live TCP displacement. True link articulation requires separate CAD solids.
+* Model accuracy: `robot_files/robot.json` supplies the DH chain and `robot_files/meshes` supplies separate link geometry; `kinematics.py` and `model3d.py` apply the same joint frames for articulated rendering.

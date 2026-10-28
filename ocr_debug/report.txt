@@ -1,0 +1,6 @@
+ X: +93.0 (score 1.02)
+ Y: -0.0 (score 1.02)
+ Z: +26.0 (score 1.02)
+Xa: +180 (score 1.02)
+Ya: -45 (score 1.01)
+Za: -0 (score 1.03)

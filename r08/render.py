@@ -351,6 +351,37 @@ def _gizmo(img, v, tip, labels):
         labels.append((pts[-1] + rad * s * 0.14 + tang * s * 0.06, AXIS_NAMES[k + 3] + "+", col, False))
 
 
+def _projected_camera_texture(img, view, tris, camera_view, calibration):
+    if camera_view is None or not camera_view.size or not calibration:
+        return
+    try:
+        matrix = np.asarray(calibration["camera_matrix"], np.float64)
+        rvec = np.asarray(calibration["rvec"], np.float64).reshape(3, 1)
+        tvec = np.asarray(calibration["tvec"], np.float64).reshape(3, 1)
+        points = np.asarray(tris[0], np.float32).reshape(-1, 3)[::3]
+        if not len(points):
+            return
+        uv, _ = cv2.projectPoints(points, rvec, tvec, matrix, np.zeros(5))
+        uv = uv.reshape(-1, 2)
+        screen, depth = view.project(points)
+        h, w = camera_view.shape[:2]
+        valid = ((depth > 0.12) & (uv[:, 0] >= 0) & (uv[:, 0] < w) &
+                 (uv[:, 1] >= 0) & (uv[:, 1] < h) &
+                 (screen[:, 0] >= 0) & (screen[:, 0] < img.shape[1]) &
+                 (screen[:, 1] >= 0) & (screen[:, 1] < img.shape[0]))
+        indices = np.flatnonzero(valid)
+        indices = indices[np.argsort(depth[indices])[::-1]]
+        layer = img.copy()
+        for i in indices:
+            x, y = np.rint(screen[i]).astype(int)
+            sx, sy = np.rint(uv[i]).astype(int)
+            color = tuple(int(c) for c in camera_view[sy, sx])
+            cv2.circle(layer, (x, y), 3, color, -1, cv2.LINE_AA)
+        cv2.addWeighted(layer, 0.72, img, 0.28, 0, img)
+    except (KeyError, ValueError, cv2.error):
+        return
+
+
 def draw_overlay(img, v, fr):
     h, w = img.shape[:2]
     labels = list(fr.labels or [])
@@ -381,6 +412,18 @@ def draw_overlay(img, v, fr):
         cv2.circle(img, c, 7, (235, 242, 255), 1, v.lt)
     if fr.gizmo:
         _gizmo(img, v, fr.tip, labels)
+    hud = fr.hud or {}
+    if hud.get("camera_texture"):
+        _projected_camera_texture(img, v, fr.tris, hud.get("camera_view"), hud["camera_texture"])
+    if hud.get("camera_landmarks"):
+        for index, point in enumerate(hud["camera_landmarks"]):
+            pixels, depth = v.project(np.asarray(point, float))
+            if depth[0] <= 0.12:
+                continue
+            x, y = np.rint(pixels[0]).astype(int)
+            if 0 <= x < w and 0 <= y < h:
+                cv2.drawMarker(img, (x, y), (80, 235, 120), cv2.MARKER_CROSS, 12, 2)
+                put_text(img, f"C{index}", (x + 7, y - 7), 0.38, (80, 235, 120))
     for P, text, col, dot in labels:
         p, d = v.project(np.asarray(P, float))
         if d[0] <= 0.12:
@@ -393,7 +436,6 @@ def draw_overlay(img, v, fr):
             cv2.circle(img, (x, y), 4, col, -1, cv2.LINE_AA)
         if text:
             put_text(img, text, (x + 7, y - 7), 0.42, col)
-    hud = fr.hud or {}
     if hud.get("axes", True):
         org, L = (54, h - 54), 32
         axes = [((1, 0, 0), (235, 90, 90), "X"), ((0, 1, 0), (90, 205, 120), "Y"), ((0, 0, 1), (100, 160, 255), "Z")]

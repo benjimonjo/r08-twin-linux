@@ -28,7 +28,7 @@ from .render import make_renderer
 from .gpu_usage import GpuUsageMonitor
 from .object_points import parse_xyz_points
 from .screen_reader import Shared, OcrWorker, StepReader, IKWorker, split_cells, grab_gray
-from .planner import step_presses, jog_press, plan_presses, step_value, fmt_step, N_LEVELS
+from .planner import Press, step_presses, jog_press, plan_presses, step_value, fmt_step, N_LEVELS
 from .guide import Guide
 from .inputs import HAVE_PYNPUT, WAYLAND_SESSION, LINUX_NO_PYNPUT, Cursor, Clicks, Hotkeys, Beacon, dark_titlebar
 from .picker import Picker, ALL_KEYS, BUTTON_KEYS
@@ -379,6 +379,26 @@ class App:
                  font=FONT_SM, wraplength=330, justify="left").grid(row=10, column=0, columnspan=6, sticky="w", pady=(8, 0))
         self.btn_abort = mk_button(body, "Take me to Abort  (F10)", self.abort_panel, bg="#5a2a2a", hover="#7a3535", fg="#ffd9d6")
         self.btn_abort.grid(row=11, column=0, columnspan=6, sticky="ew", pady=(10, 0))
+        camera = self._card(parent, "Panel camera controls")[0]
+        for index, name in enumerate(("Up", "Down", "Left", "Right", "Zoom+", "Zoom-")):
+            mk_button(camera, name, lambda n=name: self.panel_camera_action(n), padx=8, pady=4).grid(
+                row=index // 3, column=index % 3, padx=2, pady=2, sticky="ew")
+        for col, name in enumerate(("Camera Step+", "Camera Step-")):
+            mk_button(camera, name, lambda n=name: self.panel_camera_action(n), padx=8, pady=4).grid(
+                row=2, column=col, padx=2, pady=2, sticky="ew")
+        mk_button(camera, "Reset Camera", lambda: self.panel_camera_action("Reset Camera"), padx=8, pady=4).grid(
+            row=3, column=0, columnspan=2, padx=2, pady=2, sticky="ew")
+        mk_button(camera, "Switch Camera", lambda: self.panel_camera_action("Switch Camera"), padx=8, pady=4).grid(
+            row=3, column=2, padx=2, pady=2, sticky="ew")
+        for col in range(3):
+            camera.grid_columnconfigure(col, weight=1)
+        safety = self._card(parent, "Panel safety controls")[0]
+        for col, name in enumerate(("Abort", "Backup", "Safe J23", "Safe J456")):
+            mk_button(safety, name, lambda n=name: self.panel_camera_action(n),
+                      bg="#5a2a2a" if name == "Abort" else C.raised,
+                      hover="#7a3535" if name == "Abort" else C.hover,
+                      padx=8, pady=4).grid(row=0, column=col, padx=2, pady=2, sticky="ew")
+            safety.grid_columnconfigure(col, weight=1)
 
     def _build_goto_card(self, parent):
         body, head = self._card(parent, "Go to a pose")
@@ -638,6 +658,14 @@ class App:
         self.level_note.config(text=note + extra)
 
     # ------------------------------------------------------------------ target editing + Go
+    def panel_camera_action(self, name):
+        if self.guide.active:
+            self.log("A guided panel action is already running – press Stop first.", "warn")
+            return
+        self.guide.start(np.full(6, np.nan), [Press(name, kind="camera", verifiable=False,
+                                                     label=f"panel camera: {name}")],
+                         f"Panel camera: {name}", clock())
+
     def _can_start(self):
         if self.guide.active:
             self.log("A job is running \u2013 press Stop first.", "warn")
