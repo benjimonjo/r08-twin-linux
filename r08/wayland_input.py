@@ -5,9 +5,10 @@ import threading
 class WaylandPointer:
     """Request portal consent, map calibrated coordinates, and send pointer clicks."""
 
-    def __init__(self, capture_monitor, ready_callback):
+    def __init__(self, capture_monitor, ready_callback, output_type="monitor"):
         self.capture_monitor = dict(capture_monitor)
         self.ready_callback = ready_callback
+        self.output_type = str(output_type).lower()
         self.session = self.loop = self.GLib = self.Xdp = None
         self.stream_id = None
         self.stream_position = None
@@ -22,8 +23,10 @@ class WaylandPointer:
             self.GLib, self.Xdp = GLib, Xdp
             self.loop = GLib.MainLoop()
             self.portal = Xdp.Portal.new()
+            output = (Xdp.OutputType.WINDOW if self.output_type == "window"
+                      else Xdp.OutputType.MONITOR)
             self.portal.create_remote_desktop_session(
-                Xdp.DeviceType.POINTER, Xdp.OutputType.MONITOR,
+                Xdp.DeviceType.POINTER, output,
                 Xdp.RemoteDesktopFlags(0), Xdp.CursorMode.EMBEDDED,
                 None, self._created, None)
             self.loop.run()
@@ -65,17 +68,37 @@ class WaylandPointer:
             stream_left, stream_top = map(float, self.stream_position)
             stream_right = stream_left + float(self.stream_size[0])
             stream_bottom = stream_top + float(self.stream_size[1])
-            overlap_w = max(0.0, min(cap_right, stream_right) - max(cap_left, stream_left))
-            overlap_h = max(0.0, min(cap_bottom, stream_bottom) - max(cap_top, stream_top))
-            if overlap_w < min(float(cap["width"]), float(self.stream_size[0])) * 0.5 or \
-                    overlap_h < min(float(cap["height"]), float(self.stream_size[1])) * 0.5:
-                raise RuntimeError(
-                    "KDE selected a different monitor for pointer input. "
-                    f"Expected screen near {cap_left:.0f},{cap_top:.0f} "
-                    f"({cap['width']}×{cap['height']}), got "
-                    f"{self.stream_position[0]},{self.stream_position[1]} "
-                    f"({self.stream_size[0]}×{self.stream_size[1]}). "
-                    "Restart automated input and select the monitor containing the robot panel.")
+            if self.output_type == "window":
+                if abs(stream_left - cap_left) > 2 or abs(stream_top - cap_top) > 2:
+                    raise RuntimeError(
+                        "KDE selected a different window for pointer input. "
+                        f"Expected the calibrated panel window near {cap_left:.0f},{cap_top:.0f}, "
+                        f"got {stream_left:.0f},{stream_top:.0f}.")
+            else:
+                panel = self.capture_monitor
+                panel_center = (
+                    float(panel["left"]) + float(panel["width"]) / 2,
+                    float(panel["top"]) + float(panel["height"]) / 2,
+                )
+                if not (stream_left <= panel_center[0] < stream_right and
+                        stream_top <= panel_center[1] < stream_bottom):
+                    raise RuntimeError(
+                        "KDE selected a different monitor for pointer input. "
+                        f"The calibrated panel monitor is centered near "
+                        f"{panel_center[0]:.0f},{panel_center[1]:.0f}, but the selected "
+                        f"stream is {self.stream_position[0]},{self.stream_position[1]} "
+                        f"({self.stream_size[0]}×{self.stream_size[1]}).")
+                overlap_w = max(0.0, min(cap_right, stream_right) - max(cap_left, stream_left))
+                overlap_h = max(0.0, min(cap_bottom, stream_bottom) - max(cap_top, stream_top))
+                if overlap_w < min(float(cap["width"]), float(self.stream_size[0])) * 0.5 or \
+                        overlap_h < min(float(cap["height"]), float(self.stream_size[1])) * 0.5:
+                    raise RuntimeError(
+                        "KDE selected a different monitor for pointer input. "
+                        f"Expected screen near {cap_left:.0f},{cap_top:.0f} "
+                        f"({cap['width']}×{cap['height']}), got "
+                        f"{self.stream_position[0]},{self.stream_position[1]} "
+                        f"({self.stream_size[0]}×{self.stream_size[1]}). "
+                        "Restart automated input and select the monitor containing the robot panel.")
             self._ready(True, "")
         except Exception as exc:
             try:
@@ -107,7 +130,14 @@ class WaylandPointer:
                 f"{self.stream_position[0]},{self.stream_position[1]}). "
                 "Select the monitor containing the robot panel.")
         sw, sh = map(float, self.stream_size)
-        return px * sw, py * sh
+        mapped_x, mapped_y = px * sw, py * sh
+        if self.output_type == "window":
+            # KDE's window RemoteDesktop stream reports a window-sized logical
+            # surface, but pointer_position() consumes desktop coordinates for
+            # that stream. Restore the selected window's desktop origin.
+            stream_left, stream_top = map(float, self.stream_position)
+            return stream_left + mapped_x, stream_top + mapped_y
+        return mapped_x, mapped_y
 
     def click(self, x, y):
         """Queue one left click on the portal main loop; returns immediately."""

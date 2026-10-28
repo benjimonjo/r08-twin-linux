@@ -66,9 +66,10 @@ desktop chooser to appear again.
 Automated pointer input accepts normal PipeWire/RemoteDesktop scaling
 differences between the capture stream and input stream instead of rejecting
 the session for a mismatched aspect ratio.
-It still verifies that the RemoteDesktop stream overlaps the calibrated
-capture monitor. If KDE selects another monitor, R08 stops before moving the
-mouse and reports the expected and selected screen geometry.
+When the panel was captured as a window, the pointer permission prompt also
+requests that panel window; select the same window again. When the panel was
+captured as a monitor, select that monitor instead. R08 stops before moving
+the mouse if the selected stream does not match the calibrated panel source.
 Calibrated landmark markers are recomputed from the current live joint pose, so
 they move with the robot instead of remaining fixed at their original image
 coordinates. The Live twin view also shows the moving `C0`, `C1`, etc. markers

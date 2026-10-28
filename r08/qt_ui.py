@@ -299,13 +299,13 @@ def detect_panel_buttons(capture, button_region=None):
     # each contain two rows of three colored buttons. Use those rows as a
     # structural fallback and reserve OCR for the irregular jog controls.
     grid_rows = [group for group in row_groups(controls) if len(group) >= 3]
+    def remember(name, item):
+        point = [monitor["left"] + item[4], monitor["top"] + item[5]]
+        found[name] = (point, 110)
+
     if len(grid_rows) >= 2:
         grid_rows.sort(key=lambda group: np.mean([x[5] for x in group]))
         grid_floor = 0
-        def remember(name, item):
-            point = [monitor["left"] + item[4], monitor["top"] + item[5]]
-            found[name] = (point, 110)
-
         for plus_names, minus_names in (
             (("X+", "Y+", "Z+"), ("X-", "Y-", "Z-")),
             (("Xa+", "Ya+", "Za+"), ("Xa-", "Ya-", "Za-")),
@@ -390,10 +390,35 @@ def detect_panel_buttons(capture, button_region=None):
     # the robot Step+ / Step- entries.
     camera_y = max((point[1] for name, point in found.items()
                     if name in ("Down", "Left", "Zoom-")), default=0)
+    camera_step_floor = (
+        camera_top[0][5] + camera_top[0][3] + 35
+        if camera_top and len(camera_top) >= 3
+        else camera_y + 55
+    )
     camera_step_rows = [
         item for item in controls
-        if item[5] > camera_y + 35 and item[2] >= 45 and item[3] <= 35
+        if item[5] > camera_step_floor and item[2] >= 45 and item[3] <= 35
     ]
+    # Prefer the row immediately below the "Camera Jog controls" heading.
+    # This avoids selecting similarly sized buttons in unrelated windows when
+    # the panel is captured as part of a larger desktop.
+    heading_y = None
+    heading_data = pytesseract.image_to_data(
+        cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC),
+        config="--oem 3 --psm 11",
+        output_type=pytesseract.Output.DICT,
+        timeout=8,
+    )
+    camera_words = []
+    for i, word in enumerate(heading_data["text"]):
+        token = re.sub(r"[^a-z]", "", word.lower())
+        if token in {"camera", "jog", "controls"}:
+            camera_words.append((int(heading_data["top"][i]) / 3,
+                                 int(heading_data["height"][i]) / 3))
+    if camera_words:
+        heading_y = max(y for y, _ in camera_words)
+        headed_rows = [item for item in camera_step_rows if item[5] > heading_y + 18]
+        camera_step_rows = headed_rows
     if camera_step_rows:
         item = min(camera_step_rows, key=lambda value: value[5])
         half = item[2] / 2
@@ -1724,12 +1749,18 @@ class QtApp:
                 return
             self.capture_init_purpose = "automated_pointer"
             self.capture_init_worker = CaptureInitWorker(
-                separate=True, source="monitor",
-                restore_token=self._capture_restore_token(True, "monitor"),
+                separate=True, source="window" if window_source else "monitor",
+                # Do not restore the pointer window token. KDE can associate
+                # a restored window token with a different video window after
+                # Discord recreates its panels, so pointer input must always
+                # let the user select the intended control window.
+                restore_token=None if window_source else self._capture_restore_token(
+                    True, "monitor"),
                 parent=self.window)
             self.capture_init_worker.finished_result.connect(self._capture_init_finished)
             self.capture_init_worker.start()
-            self.log("Select the monitor containing that window so R08 can map its controls to desktop clicks…")
+            self.log("Select the control-panel window for pointer input (do not select the camera window)…" if window_source else
+                     "Select the monitor containing that window so R08 can map its controls to desktop clicks…")
             return
         answer = QtWidgets.QMessageBox.warning(
             self.window, "Automated robot panel input",
@@ -1740,15 +1771,67 @@ class QtApp:
         if answer != QtWidgets.QMessageBox.StandardButton.Yes: return
         try:
             capture = self.pointer_capture if window_source else self.button_capture
-            monitor = capture.monitors[0]
+            monitors = list(capture.monitors[1:] or capture.monitors)
+            panel = self.cfg.get("button_panel", {}) or {}
+            rect = panel.get("rect", {}) if isinstance(panel, dict) else {}
+            buttons = self.cfg.get("buttons", {}) or {}
+            anchor = (
+                float(rect.get("left", 0)) + float(rect.get("width", 0)) / 2,
+                float(rect.get("top", 0)) + float(rect.get("height", 0)) / 2,
+            )
+            if not rect.get("width") or not rect.get("height"):
+                points = [p for p in buttons.values() if isinstance(p, (list, tuple)) and len(p) >= 2]
+                if not points:
+                    raise RuntimeError("The calibrated panel has no usable button coordinates.")
+                anchor = (float(points[0][0]), float(points[0][1]))
+            containing = [
+                m for m in monitors
+                if float(m["left"]) <= anchor[0] < float(m["left"]) + float(m["width"])
+                and float(m["top"]) <= anchor[1] < float(m["top"]) + float(m["height"])
+            ]
+            if not containing:
+                raise RuntimeError(
+                    f"The calibrated movement panel at {anchor[0]:.0f},{anchor[1]:.0f} "
+                    "is not on any currently captured monitor. Re-run panel setup."
+                )
+            monitor = containing[0]
+            if window_source:
+                # The pointer portal may return a different window even when
+                # the chooser was opened on the correct screen. Verify the
+                # selected window contains the saved movement-panel template
+                # before granting it permission to receive clicks.
+                panel = self.cfg.get("button_panel", {}) or {}
+                template_data = panel.get("template") if isinstance(panel, dict) else None
+                if not template_data:
+                    raise RuntimeError("The calibrated panel template is missing. Re-run panel window setup.")
+                probe_name = next((name for name in self.cfg.get("buttons", {}) if name in NEEDED_BUTTONS), None)
+                if probe_name is None:
+                    raise RuntimeError("The calibrated panel has no recognized controls. Re-run panel recognition.")
+                resolve_panel_button(
+                    capture, panel, probe_name,
+                    (self.cfg.get("buttons", {}) or {})[probe_name],
+                    None,
+                    search_full=True,
+                )
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(self.window, "Automated input", str(exc)); return
+            message = str(exc)
+            if window_source:
+                message += "\n\nKDE selected the wrong window. Restart automated input and select the movement-control panel window, not the camera window."
+                try:
+                    capture.close()
+                except Exception:
+                    pass
+                self.pointer_capture = None
+            QtWidgets.QMessageBox.critical(self.window, "Automated input", message); return
         self.guided_index = 0; self.guided_before = self._current_pose().copy()
         self.automated_run = True
         self.guide_start.setEnabled(False); self.guide_next.setEnabled(False); self.guide_stop.setEnabled(True)
         self.plan_label.setText("Requesting KDE RemoteDesktop pointer permission… Approve the portal prompt to continue.")
         self.log("Requesting KDE RemoteDesktop pointer permission for automated panel clicks.")
-        self.wayland_pointer = WaylandPointer(monitor, lambda ok, message: self.portal_signals.ready.emit(ok, message))
+        self.wayland_pointer = WaylandPointer(
+            monitor,
+            lambda ok, message: self.portal_signals.ready.emit(ok, message),
+            output_type="window" if window_source else "monitor")
 
     def _on_input_ready(self, ok, message):
         if not self.automated_run:
@@ -1920,6 +2003,10 @@ class QtApp:
         self.cfg.set("button_region", None)
         self.cfg.set("button_panel", None)
         self.cfg.set("button_capture_source", source)
+        if source == "window":
+            tokens = self.cfg.get("pipewire_restore_tokens", {}) or {}
+            tokens.pop("panel_window", None)
+            self.cfg.set("pipewire_restore_tokens", tokens)
         self.cfg.save()
         self.run_setup(["button_region"])
 
