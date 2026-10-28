@@ -58,8 +58,13 @@ class WaylandPointer:
             if len(self.stream_size) != 2 or min(self.stream_size) <= 0:
                 raise RuntimeError("The portal did not provide the screen dimensions needed for pointer mapping.")
             cap = self.capture_monitor
-            if any(abs(float(a) - float(b)) > 2 for a, b in zip(self.stream_position, (cap["left"], cap["top"]))):
-                raise RuntimeError("The input portal selected a different monitor than screen setup. Re-run setup and select the same monitor in both prompts.")
+            capture_ratio = float(cap["width"]) / max(1.0, float(cap["height"]))
+            stream_ratio = float(self.stream_size[0]) / float(self.stream_size[1])
+            if abs(capture_ratio - stream_ratio) / max(capture_ratio, stream_ratio) > 0.08:
+                raise RuntimeError(
+                    "The input portal selected a screen with a different shape from the calibrated capture. "
+                    "Select the monitor that contains the robot panel."
+                )
             self._ready(True, "")
         except Exception as exc:
             try:
@@ -73,7 +78,12 @@ class WaylandPointer:
         self.ready_callback(bool(ok), str(message))
 
     def map_point(self, x, y):
-        """Convert calibrated capture pixels to the portal stream's logical space."""
+        """Map capture pixels proportionally into the selected portal stream.
+
+        The portals may report different compositor origins for the same output;
+        pointer coordinates are stream-local, so only the position within the
+        captured monitor and the stream's logical size matter here.
+        """
         m = self.capture_monitor
         width, height = float(m["width"]), float(m["height"])
         px = (float(x) - float(m["left"])) / width

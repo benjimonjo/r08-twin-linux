@@ -82,6 +82,7 @@ class App:
         self.robot_mesh, self.ghost_mesh, self.cam = RobotMesh(), RobotMesh(), Camera()
         self.q_vis = np.radians([0.0, 35.0, 25.0, 0.0, 40.0, 0.0])
         self.q_target = self.q_vis.copy()
+        self.q_vis_velocity = np.zeros(6)
         self.live_t, self.last_seq = None, -1
         self.trail_list, self.trail_arr = [], None
         self.ghost, self.ghost_t, self.ghost_warned = None, None, False
@@ -441,10 +442,11 @@ class App:
         tk.Label(r, text="point to Go:", bg=C.card, fg=C.muted, font=FONT_SM).pack(side="left", padx=(8, 2))
         for k in range(3):
             mk_button(r, str(k + 1), lambda k=k: self.point_to_go(k), padx=6, pady=2, font=FONT_SM).pack(side="left", padx=1)
-        self.show_objs, self.show_gizmo, self.show_axes = tk.BooleanVar(value=True), tk.BooleanVar(value=True), tk.BooleanVar(value=True)
+        self.show_objs = tk.BooleanVar(value=True)
+        self.show_axes = tk.BooleanVar(value=bool(self.settings.get("show_axes", True)))
+        self.show_perf = tk.BooleanVar(value=bool(self.settings.get("show_perf", True)))
         self.gaussian_splats = tk.BooleanVar(value=False)
-        for text, var in (("Show mapped objects", self.show_objs), ("Axis gizmo on the tool tip", self.show_gizmo),
-                          ("Show coordinate axes", self.show_axes), ("Gaussian splat view", self.gaussian_splats)):
+        for text, var in (("Show mapped objects", self.show_objs), ("Gaussian splat view", self.gaussian_splats)):
             tk.Checkbutton(body, text=text, variable=var, bg=C.card, fg=C.text, selectcolor=C.raised, activebackground=C.card,
                            activeforeground=C.text, font=FONT_SM, bd=0, highlightthickness=0, command=self._mark_dirty).pack(anchor="w", pady=(4, 0))
         r = tk.Frame(body, bg=C.card)
@@ -554,13 +556,17 @@ class App:
         self._chk(body, r + 1, "Step+ makes the step larger on my panel", "step_plus_larger")
         self._chk(body, r + 2, "Digit reader learns from confident reads", "self_learn")
         self._chk(body, r + 3, "Use the GPU 3D renderer (restart to apply)", "gpu")
+        self._chk(body, r + 4, "Show coordinate axes and tool axis gizmo", "show_axes", self.show_axes)
+        self._chk(body, r + 5, "Show FPS/GPU frequency counter", "show_perf", self.show_perf)
 
-    def _chk(self, parent, row, text, key):
-        var = tk.BooleanVar(value=bool(self.settings.get(key, True)))
+    def _chk(self, parent, row, text, key, var=None):
+        var = var or tk.BooleanVar(value=bool(self.settings.get(key, True)))
 
         def changed():
             self.settings[key] = bool(var.get())
             self._save_settings()
+            if key == "show_axes": self.show_axes.set(bool(var.get()))
+            if key == "show_perf": self.show_perf.set(bool(var.get()))
             self.dirty = True
         tk.Checkbutton(parent, text=text, variable=var, bg=C.panel, fg=C.text, selectcolor=C.raised, activebackground=C.panel,
                        activeforeground=C.text, font=FONT_UI, bd=0, highlightthickness=0, command=changed
@@ -1072,7 +1078,7 @@ class App:
         kind, pts = t["type"], t["pts"]
         n = 1 + sum(o["type"] == kind for o in self.objects)
         if kind == "plate":
-            val = simpledialog.askfloat("Plate thickness", "Thickness extending upward from the mapped face (in):", parent=self.root, initialvalue=0.5, minvalue=0.01, maxvalue=24)
+            val = simpledialog.askfloat("Plate thickness", "Thickness extending downward from the mapped top face (in):", parent=self.root, initialvalue=0.5, minvalue=0.01, maxvalue=24)
             obj = {"type": "plate", "name": f"Plate {n}", "pts": pts, "t": float(val or 0.5)}
         else:
             val = simpledialog.askfloat("Pipe size", "Outside diameter (in):", parent=self.root, initialvalue=4.0, minvalue=0.1, maxvalue=60)
@@ -1100,7 +1106,7 @@ class App:
             return
         o = self.objects[self.sel_i]
         if o["type"] == "plate":
-            v = simpledialog.askfloat("Plate thickness", "Thickness extending upward from the mapped face (in):", parent=self.root, initialvalue=o.get("t", 0.5), minvalue=0.01, maxvalue=24)
+            v = simpledialog.askfloat("Plate thickness", "Thickness extending downward from the mapped top face (in):", parent=self.root, initialvalue=o.get("t", 0.5), minvalue=0.01, maxvalue=24)
             if v:
                 o["t"] = float(v)
         else:
@@ -1224,18 +1230,26 @@ class App:
         with self.shared.lock:
             live, ghost = self.shared.ik.get("live"), self.shared.ik.get("ghost")
         if live is not None and live.t != self.live_t:
-            self.live_t, self.q_target = live.t, live.q.copy()
+            self.live_t = live.t
+            self.q_target = K.unwrap_q_to_reference(live.q, self.q_vis)
         if snap.pose is not None and snap.seq != self.last_seq:
             self.last_seq = snap.seq
             self.trail_list.append(K.table_pose_to_target(snap.pose)[:3, 3].copy())
             del self.trail_list[:-260]
             self.trail_arr = np.array(self.trail_list)
             self.dirty = True
-        diff = self.q_target - self.q_vis                          # smooth, speed-limited motion of the DRAWN arm
+        diff = self.q_target - self.q_vis
+        for i in K.INFINITE_JOINTS:
+            diff[i] = math.radians(wrap180(math.degrees(diff[i])))
         if float(np.max(np.abs(diff))) > 2e-4:
-            vmax = math.radians(float(self.settings.get("viz_deg_s", 25.0))) * dt
-            self.q_vis = self.q_vis + np.clip(diff * (1.0 - math.exp(-dt * 14.0)), -vmax, vmax)
+            vmax = math.radians(float(self.settings.get("viz_deg_s", 25.0)))
+            target_velocity = np.clip(diff * 8.0, -vmax, vmax)
+            accel = math.radians(90.0)
+            self.q_vis_velocity += np.clip(target_velocity - self.q_vis_velocity, -accel * dt, accel * dt)
+            self.q_vis += self.q_vis_velocity * dt
             self.dirty = True
+        else:
+            self.q_vis_velocity *= math.exp(-dt * 12.0)
         if ghost is not None and ghost.t != self.ghost_t and (self.guide.active or self._has_field_input()):
             self.ghost_t = ghost.t
             ok = ghost.pe < 15.0 and ghost.re < 6.0
@@ -1279,8 +1293,9 @@ class App:
         show_objs = bool(self.show_objs.get())
         if show_objs and self._obj_soup is not None:
             tris = tuple(np.concatenate([a, b]) for a, b in zip(tris, self._obj_soup))
-        hud = {"fps": self.fps, "gpu": self.gpu_usage, "backend": self.renderer.name,
+        hud = {"backend": self.renderer.name,
                "axes": bool(self.show_axes.get()), "gaussian_splats": bool(self.gaussian_splats.get())}
+        if self.settings.get("show_perf", True): hud.update(fps=self.fps, gpu=self.gpu_usage)
         if snap.pose is not None:
             p = snap.pose
             hud["tip_text"] = f"{fmt_pos(p[0])}  {fmt_pos(p[1])}  {fmt_pos(p[2])} in"
@@ -1294,9 +1309,11 @@ class App:
             gt, gtip, gok = self.ghost_mesh.triangles(), ginfo.tip, self.ghost["ok"]
             gp = self.ghost["pose"]
             hud["ghost_text"] = "target  " + "  ".join(f"{AXES[i]} {gp[i]:+.1f}" for i in range(6))
+        labels = [(point, "FANUC", (24, 25, 28), False) for point in self.robot_mesh.brand_points]
+        if show_objs: labels.extend(self._labels)
         fr = SimpleNamespace(tris=tris, ghost_tris=gt, ghost_col=hex_rgb(C.green if gok else C.amber), ghost_tip=gtip, ghost_ok=gok,
                              tip=info.tip, trail=self.trail_arr if self.show_trail.get() else None,
-                             labels=self._labels if show_objs else [], gizmo=bool(self.show_gizmo.get()), hud=hud)
+                             labels=labels, gizmo=bool(self.show_axes.get()), hud=hud)
         t0 = clock()
         rgb = self.renderer.render(w, h, self.cam, fr)
         self.render_ms = 0.9 * self.render_ms + 0.1 * (clock() - t0) * 1000

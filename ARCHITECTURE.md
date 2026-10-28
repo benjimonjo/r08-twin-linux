@@ -18,7 +18,8 @@ User jogs/Go: App.go_pose -> planner.plan_presses -> Guide (state machine: aim -
 | `kinematics.py` | robot dimensions, tool spikes, FK, damped-least-squares IK | change robot/tool geometry |
 | `digits.py` | digit reader: `segment`, `DigitBank` (templates), `read_cell`, `teach` | fix OCR problems |
 | `screen_reader.py` | `Shared` state + speed gate, `OcrWorker`, `IKWorker`, banner colour, step-size text | change scanning logic / gate limits |
-| `model3d.py` | `Camera`, `View` (projection), `RobotMesh` (PART_DEFS + `update`), plates/pipes, floor | change how the robot looks |
+| `model3d.py` | `Camera`, `View` (projection), imported FANUC STEP `RobotMesh`, plates/pipes, floor | change how the robot looks |
+| `step_importer.py` | STEP/OpenCascade and binary STL loading | change CAD import settings |
 | `render.py` | `GLBackend` (moderngl), `CPUBackend` (OpenCV fallback), `draw_overlay` (2D HUD) | rendering/perf |
 | `planner.py` | fewest jog-button presses (pure logic) | planning |
 | `guide.py` | guided click state machine (never clicks for the user) | guided behaviour |
@@ -46,4 +47,4 @@ Test idea: render text with PIL into 150x52 cells (white on dark, noise, grid li
 * New robot part: add to `PART_DEFS`, assign `V[S["name"]] = ...` in `RobotMesh.update`.
 * New 3D object: build a soup (`model3d.solid_soup`) and append it to `tris` in `App._render`.
 * New 2D overlay item: `render.draw_overlay` (uses `View.project`).
-* Model accuracy: only `kinematics.py` numbers affect where the twin thinks the arm is; `model3d.py` is cosmetic.
+* Model accuracy: `kinematics.py` provides the joint chain; `step_importer.py` tessellates the complete supplied 165F STEP assembly; `model3d.py` renders the fused CAD envelope translated by live TCP displacement. True link articulation requires separate CAD solids.

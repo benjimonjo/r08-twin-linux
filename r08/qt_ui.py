@@ -4,18 +4,21 @@ The Tk UI remains the cross-platform desktop implementation. Tk on Unix is
 Xlib based, so Wayland sessions use this Qt Widgets frontend instead.
 """
 import os
+import base64
 os.environ["QT_QPA_PLATFORM"] = "wayland"
 
 import math
 import time
 import re
 import sys
+import signal
 import numpy as np
 import cv2
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .common import (C, AXES, UNITS, Config, CONFIG_FILE, DIGIT_BANK_FILE,
-                     DEFAULT_SETTINGS, START_LEVEL, STEP_LEVELS, DEBUG_DIR, wrap180, new_mss, hex_rgb, clock)
+                     DEFAULT_SETTINGS, START_LEVEL, STEP_LEVELS, DEBUG_DIR, wrap180, new_mss, set_capture_source,
+                     hex_rgb, clock)
 from . import kinematics as K
 from .digits import DigitBank
 from .model3d import Camera, RobotMesh, plate_solid, pipe_solid, obj_summary
@@ -169,8 +172,8 @@ class ButtonReviewDialog(QtWidgets.QDialog):
         self.buttons = out; self.accept()
 
 
-def detect_panel_buttons(capture):
-    monitor = capture.monitors[0]
+def detect_panel_buttons(capture, button_region=None):
+    monitor = dict(button_region or capture.monitors[0])
     image = np.asarray(capture.grab(monitor))
     gray = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
     found = {}
@@ -274,13 +277,115 @@ def detect_panel_buttons(capture):
     return monitor, image, {name: value[0] for name, value in found.items()}
 
 
+def make_button_panel_calibration(image_bgra, monitor, buttons):
+    """Store button centers relative to a compact image template of their panel."""
+    points = {name: buttons[name] for name in NEEDED_BUTTONS
+              if name in buttons and buttons[name] and len(buttons[name]) >= 2 and
+              monitor["left"] <= float(buttons[name][0]) < monitor["left"] + monitor["width"] and
+              monitor["top"] <= float(buttons[name][1]) < monitor["top"] + monitor["height"]}
+    if len(points) < 4:
+        return None
+    xs = [float(p[0]) for p in points.values()]; ys = [float(p[1]) for p in points.values()]
+    pad = 24
+    left = max(float(monitor["left"]), min(xs) - pad)
+    top = max(float(monitor["top"]), min(ys) - pad)
+    right = min(float(monitor["left"] + monitor["width"]), max(xs) + pad + 1)
+    bottom = min(float(monitor["top"] + monitor["height"]), max(ys) + pad + 1)
+    x0, y0 = int(left - monitor["left"]), int(top - monitor["top"])
+    x1, y1 = int(right - monitor["left"]), int(bottom - monitor["top"])
+    crop = np.asarray(image_bgra)[y0:y1, x0:x1]
+    if crop.size == 0 or crop.shape[0] < 24 or crop.shape[1] < 24:
+        return None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGRA2GRAY) if crop.shape[2] == 4 else cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 45, 130)
+    ok, encoded = cv2.imencode(".png", edges)
+    if not ok:
+        return None
+    width, height = x1 - x0, y1 - y0
+    relative = {name: [(float(p[0]) - left) / width, (float(p[1]) - top) / height]
+                for name, p in points.items()}
+    return {"rect": {"left": left, "top": top, "width": width, "height": height},
+            "relative": relative, "template": base64.b64encode(encoded.tobytes()).decode("ascii")}
+
+
+def resolve_panel_button(capture, calibration, name, fallback, button_region=None, search_full=False):
+    """Find the calibrated button panel in the current monitor image and map a relative point."""
+    if not calibration or name not in calibration.get("relative", {}):
+        return fallback
+    monitor = dict(button_region or capture.monitors[0])
+    shot = np.asarray(capture.grab(monitor))
+    encoded = np.frombuffer(base64.b64decode(calibration["template"]), np.uint8)
+    template = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
+    if template is None or not template.size:
+        raise RuntimeError("The saved movement-panel template is invalid. Re-run panel button setup.")
+    gray = cv2.cvtColor(shot, cv2.COLOR_BGRA2GRAY) if shot.shape[2] == 4 else cv2.cvtColor(shot, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 45, 130)
+    rect = calibration["rect"]
+    ox, oy = int(rect["left"] - monitor["left"]), int(rect["top"] - monitor["top"])
+    tw, th = template.shape[1], template.shape[0]
+    if search_full:
+        # A window capture has local coordinates only. Find its calibrated
+        # controls inside a desktop monitor capture to recover global coords.
+        factor = 4
+        small_template = cv2.resize(template, (max(1, tw // factor), max(1, th // factor)), interpolation=cv2.INTER_AREA)
+        small_edges = cv2.resize(edges, (max(1, edges.shape[1] // factor), max(1, edges.shape[0] // factor)), interpolation=cv2.INTER_AREA)
+        if small_edges.shape[0] < small_template.shape[0] or small_edges.shape[1] < small_template.shape[1]:
+            raise RuntimeError("The movement panel is larger than the selected monitor capture.")
+        coarse = cv2.matchTemplate(small_edges, small_template, cv2.TM_CCOEFF_NORMED)
+        _, coarse_score, _, coarse_loc = cv2.minMaxLoc(coarse)
+        if coarse_score < .45:
+            raise RuntimeError(f"Could not find the window's movement controls on the selected monitor (match {coarse_score:.2f}).")
+        guess_x, guess_y = coarse_loc[0] * factor, coarse_loc[1] * factor
+        radius = 12
+        sx, sy = max(0, guess_x - radius), max(0, guess_y - radius)
+        ex = min(edges.shape[1], guess_x + tw + radius)
+        ey = min(edges.shape[0], guess_y + th + radius)
+        search = edges[sy:ey, sx:ex]
+        if search.shape[0] < th or search.shape[1] < tw:
+            raise RuntimeError("Could not refine the movement-panel location on the selected monitor.")
+        scores = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
+        _, score, _, location = cv2.minMaxLoc(scores)
+        if score < .48:
+            raise RuntimeError(f"Could not reliably align the window controls to the monitor (match {score:.2f}).")
+        rel_x, rel_y = calibration["relative"][name]
+        return [monitor["left"] + sx + location[0] + rel_x * tw,
+                monitor["top"] + sy + location[1] + rel_y * th]
+    margin_x, margin_y = max(tw, int(tw * .7)), max(th, int(th * .7))
+    sx, sy = max(0, ox - margin_x), max(0, oy - margin_y)
+    ex, ey = min(edges.shape[1], ox + tw + margin_x), min(edges.shape[0], oy + th + margin_y)
+    search = edges[sy:ey, sx:ex]
+    if search.shape[0] < th or search.shape[1] < tw:
+        raise RuntimeError("Could not find the movement-button panel on the captured screen.")
+    scores = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
+    _, score, _, location = cv2.minMaxLoc(scores)
+    if score < .42:
+        raise RuntimeError(f"Could not reliably locate the movement-button panel (match {score:.2f}). Re-run panel button setup.")
+    rel_x, rel_y = calibration["relative"][name]
+    return [monitor["left"] + sx + location[0] + rel_x * tw,
+            monitor["top"] + sy + location[1] + rel_y * th]
+
+
 class ButtonRecognitionWorker(QtCore.QThread):
     finished_result = QtCore.Signal(bool, object)
-    def __init__(self, capture, parent=None):
-        super().__init__(parent); self.capture = capture
+    def __init__(self, capture=None, button_region=None, source="monitor", parent=None):
+        super().__init__(parent); self.capture, self.button_region, self.source = capture, button_region, source
     def run(self):
-        try: self.finished_result.emit(True, detect_panel_buttons(self.capture))
+        try:
+            capture = self.capture or new_mss(separate=True, source=self.source)
+            self.finished_result.emit(True, (capture, detect_panel_buttons(capture, self.button_region)))
         except Exception as exc: self.finished_result.emit(False, str(exc))
+
+
+class CaptureInitWorker(QtCore.QThread):
+    finished_result = QtCore.Signal(bool, object)
+    def __init__(self, separate=False, source=None, parent=None):
+        super().__init__(parent); self.separate, self.source = separate, source
+    def run(self):
+        try:
+            capture = new_mss(separate=self.separate, source=self.source or ("monitor" if self.separate else None))
+            self.finished_result.emit(True, capture)
+        except Exception as exc:
+            self.finished_result.emit(False, str(exc))
 
 
 class SetupPicker(QtWidgets.QDialog):
@@ -300,12 +405,29 @@ class SetupPicker(QtWidgets.QDialog):
         self.setStyleSheet("background:#111318; color:#e8e9ed")
         monitor = capture.monitors[0]
         shot = capture.grab(monitor)
+        self.screenshot_bgra = np.asarray(shot).copy()
         self.image = QtGui.QImage(shot.bgra, shot.size[0], shot.size[1],
                                   shot.size[0] * 4, QtGui.QImage.Format.Format_ARGB32).copy()
         self.monitor = monitor
-        self.resize(monitor["width"], monitor["height"])
-        self.move(monitor["left"], monitor["top"])
-        self.showFullScreen()
+        if monitor.get("source") == "window":
+            # A captured app window is not a desktop overlay. Showing this
+            # calibration dialog fullscreen made Plasma hide/minimize R08 and
+            # looked like the requested app picker had vanished.
+            screen = (parent.screen() if parent is not None else None) or QtWidgets.QApplication.primaryScreen()
+            area = screen.availableGeometry() if screen is not None else QtCore.QRect(0, 0, 1280, 800)
+            scale = min(1.0, area.width() * 0.92 / self.image.width(), area.height() * 0.84 / self.image.height())
+            self.resize(max(480, round(self.image.width() * scale)), max(320, round(self.image.height() * scale)))
+            self.setWindowTitle("Set up movement controls in selected window")
+            self.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+            self.show()
+            self.frameGeometry().moveCenter(area.center())
+            self.move(self.frameGeometry().topLeft())
+            self.raise_()
+            self.activateWindow()
+        else:
+            self.resize(monitor["width"], monitor["height"])
+            self.move(monitor["left"], monitor["top"])
+            self.showFullScreen()
         self.setFocus()
 
     @property
@@ -369,6 +491,8 @@ class SetupPicker(QtWidgets.QDialog):
         if self.i >= len(self.keys):
             out = {}
             if "region" in self.rects: out["region"] = self.rects["region"]
+            if "camera_region" in self.rects: out["camera_region"] = self.rects["camera_region"]
+            if "button_region" in self.rects: out["button_region"] = self.rects["button_region"]
             if "status" in self.rects: out["status"] = self.rects["status"]
             if "step_label" in self.rects: out["step"] = self.rects["step_label"]
             if self.markers:
@@ -392,8 +516,7 @@ class SetupPicker(QtWidgets.QDialog):
                     self.rects[self.stage] = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
                     self._next()
             elif self.kind == "review":
-                self.mdrag = self._near_marker(point.x(), point.y())
-                if self.mdrag is None: self._next()
+                self._next()
         elif e.key() == QtCore.Qt.Key.Key_Escape:
             if STAGE_DEFS[self.stage][3]: self._next()
             else: self.reject()
@@ -417,7 +540,7 @@ class SetupPicker(QtWidgets.QDialog):
             super().keyPressEvent(e)
 
     def _absolute(self, x, y):
-        return int(self.monitor["left"] + x * self.monitor["width"] / self.width()), int(self.monitor["top"] + y * self.monitor["height"] / self.height())
+        return int(self.monitor["left"] + x), int(self.monitor["top"] + y)
 
     def mousePressEvent(self, e):
         self.setFocus()
@@ -458,21 +581,31 @@ class SetupPicker(QtWidgets.QDialog):
 class QtApp:
     def __init__(self):
         self.cfg = Config(CONFIG_FILE)
+        self.capture_source = self.cfg.get("capture_source", "monitor")
+        set_capture_source(self.capture_source)
         self.settings = dict(DEFAULT_SETTINGS); self.settings.update(self.cfg.get("settings", {}) or {})
         if self.cfg.get("tool"): K.TOOL.update(self.cfg.get("tool"))
         self.qt = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         self.qt.setStyle("Fusion"); self.qt.setStyleSheet(STYLE)
         self.window = QtWidgets.QMainWindow(); self.window.setWindowTitle("R08 live twin — FANUC R-2000iA/200F")
         self.window.resize(1450, 900); self.window.setMinimumSize(1000, 650)
+        self.capture = None
+        self.button_capture = None
+        self.pointer_capture = None
         self.shared = Shared(); self.ik = IKWorker(self.shared); self.ik.start()
         self.shared.set_regions(region=self.cfg.get("region"), status=self.cfg.get("status"), step=self.cfg.get("step"))
         self.bank = DigitBank(DIGIT_BANK_FILE)
         self.ocr = OcrWorker(self.shared, self.settings, self.ik, self.bank); self.ocr.start()
-        self.step_reader = StepReader(self.shared); self.step_reader.start()
-        self.capture = None
+        self.step_reader = StepReader(self.shared, self.button_capture); self.step_reader.start()
+        self.capture_init_worker = None
+        self.capture_init_purpose = None
+        self.pending_setup_keys = None
+        self.setup_queue = []
+        self._interrupt_requested = False
         self.renderer, self.render_note = make_renderer(bool(self.settings.get("gpu", True)))
         self.robot_mesh, self.ghost_mesh, self.cam = RobotMesh(), RobotMesh(), Camera()
         self.q_vis = np.radians([0, 35, 25, 0, 40, 0]); self.q_target = self.q_vis.copy()
+        self.q_vis_velocity = np.zeros(6)
         self.live_t = self.ghost_t = None; self.ghost = None; self.trail = []; self.dirty = True
         self.follow_tool = False; self.show_trail = True
         self.guided_plan = []; self.guided_index = 0; self.guided_before = None
@@ -526,8 +659,11 @@ class QtApp:
         follow = QtWidgets.QCheckBox("Follow tool"); follow.toggled.connect(self._set_follow); views.addWidget(follow)
         trail = QtWidgets.QCheckBox("Trail"); trail.setChecked(True); trail.toggled.connect(self._set_trail); views.addWidget(trail)
         self.gaussian_splats = QtWidgets.QCheckBox("Gaussian splat view")
-        self.gaussian_splats.setToolTip("Render the robot and mapped objects as soft camera-projected splats")
+        self.gaussian_splats.setToolTip("Render mapped objects as soft splats and show the active Discord camera as Gaussian image points")
         self.gaussian_splats.toggled.connect(self._mark_dirty); views.addWidget(self.gaussian_splats)
+        self.camera_source = QtWidgets.QComboBox(); self.camera_source.addItems(["Stream camera 1", "Stream camera 2"])
+        self.camera_source.setToolTip("Select the label for the camera currently selected in the Discord stream")
+        self.camera_source.currentIndexChanged.connect(self._mark_dirty); views.addWidget(self.camera_source)
         self.log_view = QtWidgets.QTextEdit(); self.log_view.setReadOnly(True); self.log_view.setMaximumHeight(110); ll.addWidget(self.log_view)
         split.addWidget(left)
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setMinimumWidth(370); scroll.setMaximumWidth(470)
@@ -546,6 +682,17 @@ class QtApp:
         self.button_state = QtWidgets.QLabel("Panel buttons not set up"); form.addWidget(self.button_state)
         setupb = QtWidgets.QPushButton("Set up panel buttons"); setupb.clicked.connect(lambda: self.run_setup([k for k in ALL_KEYS if k != "region"]))
         form.addWidget(setupb); sl.addWidget(status)
+        camera_setup = QtWidgets.QPushButton("Select Discord camera video")
+        camera_setup.clicked.connect(lambda: self.run_setup(["camera_region"]))
+        form.addWidget(camera_setup)
+        button_capture_setup = QtWidgets.QPushButton("Select movement-button screen share")
+        button_capture_setup.setToolTip("Opens a separate desktop screen-share session for robot controls, independent of the camera/video capture")
+        button_capture_setup.clicked.connect(lambda: self._reselect_button_screen_share("monitor"))
+        form.addWidget(button_capture_setup)
+        button_window_setup = QtWidgets.QPushButton("Select movement-button window")
+        button_window_setup.setToolTip("Choose the app window containing the movement controls in the Wayland portal")
+        button_window_setup.clicked.connect(lambda: self._reselect_button_screen_share("window"))
+        form.addWidget(button_window_setup)
         self.recognize_button = QtWidgets.QPushButton("Recognize panel buttons automatically…"); self.recognize_button.clicked.connect(self._recognize_buttons); form.addWidget(self.recognize_button)
         movement = self._group("Movement options"); ml = QtWidgets.QVBoxLayout(movement)
         self.step_combo = QtWidgets.QComboBox()
@@ -616,8 +763,6 @@ class QtApp:
         for idx in range(3):
             b = QtWidgets.QPushButton(f"Point {idx+1} to target"); b.clicked.connect(lambda checked=False, n=idx: self._object_point_to_target(n)); ol.addWidget(b)
         self.show_objects = QtWidgets.QCheckBox("Show mapped objects"); self.show_objects.setChecked(True); self.show_objects.toggled.connect(self._mark_dirty); ol.addWidget(self.show_objects)
-        self.show_gizmo = QtWidgets.QCheckBox("Show tool axis gizmo"); self.show_gizmo.setChecked(True); self.show_gizmo.toggled.connect(self._mark_dirty); ol.addWidget(self.show_gizmo)
-        self.show_axes = QtWidgets.QCheckBox("Show coordinate axes"); self.show_axes.setChecked(True); self.show_axes.toggled.connect(self._mark_dirty); ol.addWidget(self.show_axes)
         self._refresh_objects(); sl.addWidget(objects)
         digit = self._group("Digit reader"); dl = QtWidgets.QVBoxLayout(digit)
         self.raw_label = QtWidgets.QLabel("Waiting for the number table…"); self.raw_label.setWordWrap(True); dl.addWidget(self.raw_label)
@@ -661,7 +806,9 @@ class QtApp:
             spin.setValue(float(self.settings.get(key, low))); controls[key] = spin; form.addRow(label, spin)
         toggles = {}
         for key, label in (("verify_each", "Verify pose after each action"), ("step_plus_larger", "Step+ increases the step size"),
-                           ("self_learn", "Learn from confident digit reads"), ("gpu", "Use GPU renderer (restart to apply)")):
+                           ("self_learn", "Learn from confident digit reads"), ("gpu", "Use GPU renderer (restart to apply)"),
+                           ("show_axes", "Show coordinate axes and tool axis gizmo"),
+                           ("show_perf", "Show FPS/GPU frequency counter")):
             check = QtWidgets.QCheckBox(label); check.setChecked(bool(self.settings.get(key, True))); toggles[key] = check; form.addRow(check)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject); form.addRow(buttons)
@@ -669,6 +816,7 @@ class QtApp:
             for key, spin in controls.items(): self.settings[key] = spin.value()
             for key, check in toggles.items(): self.settings[key] = check.isChecked()
             self.cfg.set("settings", self.settings); self.cfg.save()
+            self.dirty = True
 
     def _save_ocr_snapshot(self):
         if not self.cfg.get("region"):
@@ -715,7 +863,7 @@ class QtApp:
             return
         name, ok = QtWidgets.QInputDialog.getText(self.window, "Plate name", "Name:", text=f"Plate {1 + sum(o.get('type') == 'plate' for o in self.objects)}")
         if not ok or not name.strip(): return
-        thickness, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness extending upward from the mapped face (in):", 0.5, 0.01, 24.0, 2)
+        thickness, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness extending downward from the mapped top face (in):", 0.5, 0.01, 24.0, 2)
         if not ok: return
         trial.update(name=name.strip(), t=thickness)
         self.objects.append(trial); self.cfg.set("objects", self.objects); self.cfg.save()
@@ -775,7 +923,7 @@ class QtApp:
             self.teach_label.setText(f"Point {len(self.teach['pts'])} recorded. Position the tip at the next point."); return
         kind = self.teach["type"]
         if kind == "plate":
-            value, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness extending upward from the mapped face (in):", 0.5, 0.01, 24.0, 2)
+            value, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness extending downward from the mapped top face (in):", 0.5, 0.01, 24.0, 2)
             if not ok: self.teach["pts"].pop(); return
             inner = None
         else:
@@ -803,7 +951,7 @@ class QtApp:
         if i < 0: return
         obj = self.objects[i]
         if obj["type"] == "plate":
-            val, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness extending upward from the mapped face (in):", float(obj.get("t", .5)), .01, 24, 2)
+            val, ok = QtWidgets.QInputDialog.getDouble(self.window, "Plate thickness", "Thickness extending downward from the mapped top face (in):", float(obj.get("t", .5)), .01, 24, 2)
             if ok: obj["t"] = val
         else:
             val, ok = QtWidgets.QInputDialog.getDouble(self.window, "Pipe outside diameter", "Outside diameter (in):", float(obj.get("d", 4)), .1, 60, 2)
@@ -890,7 +1038,7 @@ class QtApp:
             self.plan_label.setText("Target is already within the configured tolerance.")
         else:
             self.plan_label.setText(f"Movement plan ready: {len(plan)} panel actions. Start the guide to follow them one at a time.")
-        self.guide_start.setEnabled(bool(plan) and not self.guided_next.isEnabled())
+        self.guide_start.setEnabled(bool(plan) and not self.guide_next.isEnabled())
         self.log(f"Movement plan prepared: {len(plan)} panel actions.")
 
     def _start_guided_move(self):
@@ -909,9 +1057,7 @@ class QtApp:
         action = self.guided_plan[self.guided_index]
         name = action.btn.replace("-", "−")
         suffix = f"  ·  {action.label}"
-        pos = (self.cfg.get("buttons", {}) or {}).get(action.btn)
-        location = f" (setup screen position {int(pos[0])}, {int(pos[1])})" if pos and len(pos) >= 2 else ""
-        self.plan_label.setText(f"Action {self.guided_index + 1} of {len(self.guided_plan)}: press {name}{location} on the robot panel{suffix}. Then click ‘Confirm panel action’. The app does not press it for you.")
+        self.plan_label.setText(f"Action {self.guided_index + 1} of {len(self.guided_plan)}: press {name} on the robot panel{suffix}. Then click ‘Confirm panel action’. The app does not press it for you.")
 
     def _confirm_guided_action(self):
         if not self.guided_plan or self.guided_index >= len(self.guided_plan): return
@@ -946,15 +1092,36 @@ class QtApp:
 
     def _start_automated_move(self):
         buttons = self.cfg.get("buttons", {}) or {}
+        window_source = self.cfg.get("button_capture_source", "monitor") == "window"
+        if not self.cfg.get("button_panel"):
+            QtWidgets.QMessageBox.warning(self.window, "Panel box not calibrated",
+                "Run panel button setup or button recognition once to save the movement-panel box and relative button positions.")
+            return
         missing = sorted({p.btn for p in self.guided_plan if p.btn not in buttons})
         if missing:
             QtWidgets.QMessageBox.warning(self.window, "Automated input", "Set up these panel button positions first: " + ", ".join(missing))
             return
-        window_rect = self.window.frameGeometry()
-        covered = [name for name in {p.btn for p in self.guided_plan}
-                   if window_rect.contains(QtCore.QPoint(round(buttons[name][0]), round(buttons[name][1])))]
-        if covered:
-            QtWidgets.QMessageBox.warning(self.window, "Automated input", "Move the R08 window away from these panel buttons before starting: " + ", ".join(sorted(covered)))
+        if self.button_capture is None:
+            if self.capture_init_worker and self.capture_init_worker.isRunning():
+                self.log("Waiting for the current screen-share selection to finish before automated input.")
+                return
+            self.capture_init_purpose = "automated_input"
+            self.capture_init_worker = CaptureInitWorker(
+                separate=True, source=self.cfg.get("button_capture_source", "monitor"), parent=self.window)
+            self.capture_init_worker.finished_result.connect(self._capture_init_finished)
+            self.capture_init_worker.start()
+            self.log("Select the movement-button window in the screen-share prompt…" if window_source else
+                     "Select the movement-button monitor in the screen-share prompt…")
+            return
+        if window_source and self.pointer_capture is None:
+            if self.capture_init_worker and self.capture_init_worker.isRunning():
+                self.log("Waiting for the current screen-share selection to finish before automated input.")
+                return
+            self.capture_init_purpose = "automated_pointer"
+            self.capture_init_worker = CaptureInitWorker(separate=True, source="monitor", parent=self.window)
+            self.capture_init_worker.finished_result.connect(self._capture_init_finished)
+            self.capture_init_worker.start()
+            self.log("Select the monitor containing that window so R08 can map its controls to desktop clicks…")
             return
         answer = QtWidgets.QMessageBox.warning(
             self.window, "Automated robot panel input",
@@ -964,8 +1131,8 @@ class QtApp:
             QtWidgets.QMessageBox.StandardButton.Cancel)
         if answer != QtWidgets.QMessageBox.StandardButton.Yes: return
         try:
-            if self.capture is None: self.capture = new_mss()
-            monitor = self.capture.monitors[0]
+            capture = self.pointer_capture if window_source else self.button_capture
+            monitor = capture.monitors[0]
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self.window, "Automated input", str(exc)); return
         self.guided_index = 0; self.guided_before = self._current_pose().copy()
@@ -997,6 +1164,13 @@ class QtApp:
         if not pos or len(pos) < 2:
             self._stop_automated_on_error(f"No calibrated position for {action.btn}."); return
         try:
+            window_source = self.cfg.get("button_capture_source", "monitor") == "window"
+            capture = self.pointer_capture if window_source else self.button_capture
+            pos = resolve_panel_button(capture, self.cfg.get("button_panel"), action.btn, pos,
+                                       None if window_source else self.cfg.get("button_region"),
+                                       search_full=window_source)
+            if self.window.frameGeometry().contains(QtCore.QPoint(round(pos[0]), round(pos[1]))):
+                raise RuntimeError("Move the R08 window away from the detected movement-button panel, then resume.")
             self.plan_label.setText(f"Automated action {self.guided_index + 1}/{len(self.guided_plan)}: clicking {action.btn.replace('-', '−')} — {action.label}")
             self.wayland_pointer.click(float(pos[0]), float(pos[1]))
             now = clock()
@@ -1081,23 +1255,76 @@ class QtApp:
 
     def _setup_menu(self):
         menu = QtWidgets.QMenu(self.window)
+        capture_menu = menu.addMenu("Primary capture source")
+        capture_menu.addAction("Capture a monitor", lambda: self._set_capture_source_mode("monitor"))
+        capture_menu.addAction("Capture a window", lambda: self._set_capture_source_mode("window"))
+        menu.addSeparator()
         menu.addAction("Run full setup", lambda: self.run_setup(ALL_KEYS))
         menu.addAction("Number table", lambda: self.run_setup(["region"]))
         menu.addAction("Panel buttons", lambda: self.run_setup(BUTTON_KEYS))
+        movement_capture_menu = menu.addMenu("Movement-button capture source")
+        movement_capture_menu.addAction("Choose a screen", lambda: self._reselect_button_screen_share("monitor"))
+        movement_capture_menu.addAction("Choose a window", lambda: self._reselect_button_screen_share("window"))
+        menu.addAction("Discord camera video region", lambda: self.run_setup(["camera_region"]))
         menu.addAction("Recognize panel buttons automatically…", self._recognize_buttons)
         menu.addAction("Step-size text region", lambda: self.run_setup(["step_label"]))
         menu.addAction("Optional banner and step text", lambda: self.run_setup(["status", "step_label"]))
         menu.exec(QtGui.QCursor.pos())
+
+    def _set_capture_source_mode(self, source):
+        current = self.cfg.get("capture_source", "monitor")
+        if source == current:
+            return
+        if not os.environ.get("WAYLAND_DISPLAY"):
+            QtWidgets.QMessageBox.information(self.window, "Capture source",
+                "Window capture is provided by the Wayland desktop portal. This session is not running on Wayland.")
+            return
+        if self.automated_run or self.guide_next.isEnabled() or (self.update_worker and self.update_worker.isRunning()):
+            QtWidgets.QMessageBox.warning(self.window, "Capture source", "Stop the current movement and wait for updater activity to finish before changing the capture source.")
+            return
+        answer = QtWidgets.QMessageBox.question(self.window, "Change capture source",
+            f"R08 will restart and the next screen-share prompt will let you choose a {source}. "
+            "The number-table, banner, step-text, and Discord-video regions must be selected again for the new capture.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self.cfg.set("capture_source", source)
+        for key in ("region", "status", "step", "camera_region"):
+            self.cfg.set(key, None)
+        self.cfg.save()
+        self._reload_application(confirm=False)
+
+    def _reselect_button_screen_share(self, source="monitor"):
+        if self.capture_init_worker and self.capture_init_worker.isRunning():
+            QtWidgets.QMessageBox.information(self.window, "Movement-button screen share",
+                "Wait for the current screen-share portal selection to finish first.")
+            return
+        if self.button_capture is not None:
+            try: self.button_capture.close()
+            except Exception: pass
+            self.button_capture = None
+        if self.pointer_capture is not None:
+            try: self.pointer_capture.close()
+            except Exception: pass
+            self.pointer_capture = None
+        # These local pixel regions and templates belong to the old portal source.
+        self.cfg.set("button_region", None)
+        self.cfg.set("button_panel", None)
+        self.cfg.set("button_capture_source", source)
+        self.cfg.save()
+        self.run_setup(["button_region"])
 
     def _recognize_buttons(self):
         if not HAVE_TESS or pytesseract is None:
             QtWidgets.QMessageBox.warning(self.window, "Button recognition", "Button recognition needs pytesseract and the Tesseract executable. Install them, then retry.")
             return
         try:
-            if self.capture is None: self.capture = new_mss()
             if getattr(self, "button_recognition_worker", None) and self.button_recognition_worker.isRunning(): return
             self.recognize_button.setEnabled(False); self.recognize_button.setText("Recognizing labels…")
-            self.button_recognition_worker = ButtonRecognitionWorker(self.capture, self.window)
+            self.button_recognition_worker = ButtonRecognitionWorker(
+                self.button_capture, self.cfg.get("button_region"),
+                self.cfg.get("button_capture_source", "monitor"), self.window)
             self.button_recognition_worker.finished_result.connect(self._button_recognition_finished)
             self.button_recognition_worker.start()
         except Exception as exc:
@@ -1108,13 +1335,16 @@ class QtApp:
         self.recognize_button.setEnabled(True); self.recognize_button.setText("Recognize panel buttons automatically…")
         if not ok:
             QtWidgets.QMessageBox.warning(self.window, "Button recognition failed", str(result)); return
-        monitor, image, detected = result
+        self.button_capture, (monitor, image, detected) = result
         if not detected:
             QtWidgets.QMessageBox.information(self.window, "Button recognition", "No panel button labels were detected. Move the R08 window away, ensure the panel is visible, or use manual panel setup.")
             return
         dlg = ButtonReviewDialog(self.window, monitor, image, detected, self.cfg.get("buttons", {}) or {})
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted or not dlg.buttons: return
-        self.cfg.set("buttons", dlg.buttons); self.cfg.save(); self._refresh()
+        self.cfg.set("buttons", dlg.buttons)
+        panel = make_button_panel_calibration(image, monitor, dlg.buttons)
+        if panel: self.cfg.set("button_panel", panel)
+        self.cfg.save(); self._refresh()
         self.log(f"Saved recognized panel button positions ({len(detected)} labels detected; review confirmed).")
 
     def _update_button_clicked(self):
@@ -1194,6 +1424,12 @@ class QtApp:
         if self.update_worker and self.update_worker.isRunning():
             QtWidgets.QMessageBox.warning(self.window, "Reload unavailable", "Wait for the GitHub update check or install to finish before reloading.")
             return
+        if self.capture_init_worker and self.capture_init_worker.isRunning():
+            QtWidgets.QMessageBox.warning(self.window, "Reload unavailable", "Wait for the screen-share portal selection to finish before reloading.")
+            return
+        if getattr(self, "button_recognition_worker", None) and self.button_recognition_worker.isRunning():
+            QtWidgets.QMessageBox.warning(self.window, "Reload unavailable", "Wait for button recognition to finish before reloading.")
+            return
         if confirm:
             answer = QtWidgets.QMessageBox.question(self.window, "Reload development code", "Save settings and restart R08 from the current Python files?",
                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
@@ -1211,27 +1447,105 @@ class QtApp:
             worker.stop()
         for worker in (self.ocr, self.step_reader, self.ik):
             worker.join(timeout=2)
+        self._close_capture_sources()
         os.execv(sys.executable, [sys.executable, *sys.argv])
 
     def run_setup(self, keys):
         try:
-            if self.capture is None: self.capture = new_mss()
-            dlg = SetupPicker(self.window, keys, self.capture)
-            if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted or not dlg.result_data:
+            panel_keys = set(BUTTON_KEYS) | {"button_region", "step_label"}
+            if any(key in panel_keys for key in keys) and any(key not in panel_keys for key in keys):
+                stream_keys = [key for key in keys if key not in panel_keys]
+                button_keys = [key for key in keys if key in panel_keys]
+                self.setup_queue = [part for part in (stream_keys, button_keys) if part]
+                self._run_next_setup()
                 return
-            result = dlg.result_data
-            for src, dst in (("region", "region"), ("status", "status"), ("step", "step")):
-                if src in result: self.cfg.set(dst, result[src])
-            if "buttons" in result:
-                old = self.cfg.get("buttons", {}) or {}
-                old.update(result["buttons"]); self.cfg.set("buttons", old)
-            self.cfg.save(); self.shared.set_regions(region=self.cfg.get("region"), status=self.cfg.get("status"), step=self.cfg.get("step"))
-            self.log("Setup saved.")
-            if "region" in result: self.log("Tip: teach a few digits so the reader learns the stream font.")
-            self._refresh()
+            separate = all(key in panel_keys for key in keys)
+            capture = self.button_capture if separate else self.capture
+            if capture is None:
+                if self.capture_init_worker and self.capture_init_worker.isRunning():
+                    self.log("Waiting for the current screen-share selection to finish.")
+                    return
+                self.pending_setup_keys = list(keys)
+                self.capture_init_purpose = "setup_button" if separate else "setup_stream"
+                self.capture_init_worker = CaptureInitWorker(
+                    separate=separate,
+                    source=self.cfg.get("button_capture_source", "monitor") if separate else None,
+                    parent=self.window)
+                self.capture_init_worker.finished_result.connect(self._capture_init_finished)
+                if separate and self.cfg.get("button_capture_source", "monitor") == "window":
+                    # Make sure the portal request starts from a visible,
+                    # activated Qt window. On Plasma, launching it while R08
+                    # is minimized/fullscreen can leave the chooser behind it.
+                    self.window.showNormal(); self.window.raise_(); self.window.activateWindow()
+                    QtCore.QTimer.singleShot(180, self.capture_init_worker.start)
+                    self.log("Opening KDE's screen-share chooser. Select the Windows tab, choose the app with the movement controls, then press Share.")
+                else:
+                    self.capture_init_worker.start()
+                    self.log("Opening the separate movement-button screen share…" if separate else "Opening the screen/window share…")
+                return
+            self._open_setup_dialog(keys, capture)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self.window, "Setup failed", str(exc))
             self.log(f"Setup failed: {exc}")
+
+    def _open_setup_dialog(self, keys, capture):
+        dlg = SetupPicker(self.window, keys, capture)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted or not dlg.result_data:
+            self.setup_queue.clear()
+            return
+        result = dlg.result_data
+        for src, dst in (("region", "region"), ("status", "status"), ("step", "step"),
+                         ("camera_region", "camera_region"), ("button_region", "button_region")):
+            if src in result: self.cfg.set(dst, result[src])
+        if "buttons" in result:
+            old = self.cfg.get("buttons", {}) or {}
+            old.update(result["buttons"]); self.cfg.set("buttons", old)
+            panel = make_button_panel_calibration(dlg.screenshot_bgra, dlg.monitor, old)
+            if panel: self.cfg.set("button_panel", panel)
+        self.cfg.save(); self.shared.set_regions(region=self.cfg.get("region"), status=self.cfg.get("status"), step=self.cfg.get("step"))
+        self.log("Setup saved.")
+        if "region" in result: self.log("Tip: teach a few digits so the reader learns the stream font.")
+        self._refresh()
+        if self.setup_queue:
+            QtCore.QTimer.singleShot(0, self._run_next_setup)
+
+    def _run_next_setup(self):
+        if self.setup_queue:
+            self.run_setup(self.setup_queue.pop(0))
+
+    def _capture_init_finished(self, ok, result):
+        purpose = self.capture_init_purpose
+        self.capture_init_worker = None; self.capture_init_purpose = None
+        if not ok:
+            self.pending_setup_keys = None; self.setup_queue.clear()
+            if purpose == "camera_capture":
+                self.camera_capture_error_time = clock()
+                self.log(f"Discord camera capture failed: {result}")
+            else:
+                QtWidgets.QMessageBox.warning(self.window, "Screen share unavailable", str(result))
+            return
+        if purpose in ("setup_button", "automated_input"):
+            self.button_capture = result
+            self.step_reader.set_capture(result)
+        elif purpose == "automated_pointer":
+            self.pointer_capture = result
+        else:
+            self.capture = result
+        if purpose in ("setup_button", "setup_stream"):
+            keys = self.pending_setup_keys; self.pending_setup_keys = None
+            if keys: self.run_setup(keys)
+        elif purpose in ("automated_input", "automated_pointer"):
+            self._start_automated_move()
+
+    def _close_capture_sources(self):
+        seen = set()
+        for capture in (self.pointer_capture, self.button_capture, self.capture):
+            if capture is None or id(capture) in seen: continue
+            seen.add(id(capture))
+            try:
+                capture.close()
+            except Exception:
+                pass
 
     def _help(self):
         QtWidgets.QMessageBox.information(self.window, "R08 live twin", "Set up the number table to start screen reading. Use the Setup menu to calibrate panel buttons and optional status regions.\n\nMovement planning and step-by-step manual guidance are available. Press each requested panel control yourself, then confirm it in the app; the Wayland portal does not provide global panel clicks in this build.")
@@ -1271,6 +1585,8 @@ class QtApp:
 
     def _refresh(self):
         self.button_state.setText("Panel buttons ready" if all(n in (self.cfg.get("buttons", {}) or {}) for n in NEEDED_BUTTONS) else "Panel buttons not set up")
+        if self.cfg.get("button_panel"):
+            self.button_state.setText(self.button_state.text() + " · relative panel tracking on")
         self.capture_label.setText("Number table configured" if self.cfg.get("region") else "Number table not configured")
 
     def _tick(self):
@@ -1297,7 +1613,7 @@ class QtApp:
         with self.shared.lock:
             live, ghost = self.shared.ik.get("live"), self.shared.ik.get("ghost")
         if live and live.t != self.live_t:
-            self.live_t = live.t; self.q_target = live.q.copy()
+            self.live_t = live.t; self.q_target = K.unwrap_q_to_reference(live.q, self.q_vis)
         if ghost and ghost.t != self.ghost_t:
             self.ghost_t = ghost.t
             self.ghost = {"q": ghost.q.copy(), "ok": ghost.pe < 15.0 and ghost.re < 6.0, "pose": ghost.pose}
@@ -1309,16 +1625,47 @@ class QtApp:
             if np.linalg.norm(tip - self.cam.target) > .005:
                 self.cam.target = self.cam.target + (tip - self.cam.target) * (1 - math.exp(-dt * 3)); self.dirty = True
         diff = self.q_target - self.q_vis
+        for i in K.INFINITE_JOINTS:
+            diff[i] = math.radians(wrap180(math.degrees(diff[i])))
         if np.max(np.abs(diff)) > 2e-4:
-            vmax = math.radians(float(self.settings.get("viz_deg_s", 25))) * dt
-            self.q_vis += np.clip(diff * (1 - math.exp(-dt * 14)), -vmax, vmax); self.dirty = True
+            vmax = math.radians(float(self.settings.get("viz_deg_s", 25)))
+            target_velocity = np.clip(diff * 8.0, -vmax, vmax)
+            accel = math.radians(90.0)
+            self.q_vis_velocity += np.clip(target_velocity - self.q_vis_velocity, -accel * dt, accel * dt)
+            self.q_vis += self.q_vis_velocity * dt; self.dirty = True
+        else:
+            self.q_vis_velocity *= math.exp(-dt * 12.0)
+        camera_region = self.cfg.get("camera_region")
+        if (self.gaussian_splats.isChecked() and camera_region and
+                now - getattr(self, "camera_frame_time", 0.0) >= 0.20 and
+                now - getattr(self, "camera_capture_error_time", 0.0) > 5.0):
+            try:
+                if self.capture is None:
+                    if not (self.capture_init_worker and self.capture_init_worker.isRunning()):
+                        self.capture_init_purpose = "camera_capture"
+                        self.capture_init_worker = CaptureInitWorker(parent=self.window)
+                        self.capture_init_worker.finished_result.connect(self._capture_init_finished)
+                        self.capture_init_worker.start()
+                else:
+                    shot = np.asarray(self.capture.grab(camera_region))
+                    self.camera_frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2RGB)
+                    self.camera_frame_time = now; self.dirty = True
+            except Exception as exc:
+                if now - getattr(self, "camera_capture_error_time", 0.0) > 5:
+                    self.camera_capture_error_time = now
+                    self.log(f"Discord camera capture failed: {exc}")
         if self.dirty: self._render(snap); self.dirty = False
 
     def _render(self, snap):
         w, h = max(400, self.image_label.width()), max(300, self.image_label.height())
         info = self.robot_mesh.update(self.q_vis)
-        hud = {"backend": self.renderer.name, "fps": self.fps, "gpu": self.gpu_usage,
-               "axes": self.show_axes.isChecked(), "gaussian_splats": self.gaussian_splats.isChecked()}
+        hud = {"backend": self.renderer.name,
+               "axes": bool(self.settings.get("show_axes", True)), "gaussian_splats": self.gaussian_splats.isChecked()}
+        if self.settings.get("show_perf", True):
+            hud.update(fps=self.fps, gpu=self.gpu_usage)
+        if self.gaussian_splats.isChecked() and getattr(self, "camera_frame", None) is not None:
+            hud["camera_view"] = self.camera_frame
+            hud["camera_name"] = f"Discord camera {self.camera_source.currentIndex() + 1}"
         if snap.pose is not None: hud["tip_text"] = "  ".join(fmt_pos(snap.pose[i]) for i in range(3)) + " in"
         else: hud["msg"] = "Open Setup to select the number table"
         ghost_tris = ghost_tip = None; ghost_ok = True; ghost_col = hex_rgb(C.green)
@@ -1328,7 +1675,8 @@ class QtApp:
             ghost_tris, ghost_tip, ghost_ok = self.ghost_mesh.triangles(), gi.tip, self.ghost["ok"]
             ghost_col = hex_rgb(C.green if ghost_ok else C.amber)
             hud["ghost_text"] = "target  " + "  ".join(f"{AXES[i]} {self.ghost['pose'][i]:+.1f}" for i in range(6))
-        tris = self.robot_mesh.triangles(); labels = []
+        tris = self.robot_mesh.triangles()
+        labels = [(point, "FANUC", (24, 25, 28), False) for point in self.robot_mesh.brand_points]
         if self.show_objects.isChecked():
             soups = []
             for i, obj in enumerate(self.objects):
@@ -1343,7 +1691,7 @@ class QtApp:
             if soups: tris = tuple(np.concatenate([a, b]) for a, b in zip(tris, tuple(np.concatenate([s[j] for s in soups]) for j in range(3))))
         frame = SimpleNamespace(tris=tris, ghost_tris=ghost_tris, ghost_col=ghost_col, ghost_tip=ghost_tip,
                                 ghost_ok=ghost_ok, tip=info.tip, trail=np.asarray(self.trail) if self.show_trail and self.trail else None,
-                                labels=labels, gizmo=self.show_gizmo.isChecked(), hud=hud)
+                                labels=labels, gizmo=bool(self.settings.get("show_axes", True)), hud=hud)
         rgb = self.renderer.render(w, h, self.cam, frame)
         self._fps_count += 1
         elapsed = clock() - self._fps_time
@@ -1354,6 +1702,17 @@ class QtApp:
         self.image_label.setPixmap(QtGui.QPixmap.fromImage(qimg))
 
     def _close_event(self, event):
+        portal_workers = [self.capture_init_worker, getattr(self, "button_recognition_worker", None)]
+        active_workers = [worker for worker in portal_workers if worker is not None and worker.isRunning()]
+        if active_workers and not self._interrupt_requested:
+            QtWidgets.QMessageBox.warning(self.window, "Screen share is starting", "Cancel the desktop portal prompt and wait for capture setup to finish before closing R08.")
+            event.ignore(); return
+        if active_workers:
+            for worker in active_workers:
+                worker.terminate()
+                worker.wait(1000)
+        if hasattr(self, "timer"): self.timer.stop()
+        if hasattr(self, "interrupt_timer"): self.interrupt_timer.stop()
         self.automated_run = False
         if self.wayland_pointer: self.wayland_pointer.close()
         self.wayland_pointer = None
@@ -1361,15 +1720,39 @@ class QtApp:
             self.cfg.set("settings", self.settings); self.cfg.save(); self.bank.save()
         except Exception: pass
         self.ocr.stop(); self.step_reader.stop(); self.ik.stop()
+        for worker in (self.ocr, self.step_reader, self.ik): worker.join(timeout=2)
         self.gpu_monitor.stop(); self.gpu_monitor.join(timeout=2)
+        self._close_capture_sources()
         event.accept()
 
     def run(self):
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, self._on_sigint)
+        self.interrupt_timer = QtCore.QTimer(self.window)
+        self.interrupt_timer.timeout.connect(self._poll_sigint)
+        self.interrupt_timer.start(100)
         try:
-            return self.qt.exec()
-        except KeyboardInterrupt:
-            self.window.close()
-            return 130
+            result = self.qt.exec()
+            return 130 if self._interrupt_requested else result
+        finally:
+            self.interrupt_timer.stop()
+            signal.signal(signal.SIGINT, previous_sigint)
+
+    def _on_sigint(self, _signum, _frame):
+        # Do not raise KeyboardInterrupt inside a PySide callback; Qt would
+        # print it and keep the event loop alive. The timer closes dialogs safely.
+        self._interrupt_requested = True
+
+    def _poll_sigint(self):
+        if not self._interrupt_requested:
+            return
+        self.interrupt_timer.stop()
+        modal = self.qt.activeModalWidget()
+        if modal is not None:
+            modal.close()
+        self.window.close()
+        if self.window.isVisible():
+            self.qt.quit()
 
 
 def main():

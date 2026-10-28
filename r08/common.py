@@ -71,6 +71,8 @@ DEFAULT_SETTINGS = {
     "viz_deg_s": 25.0,        # max speed of the DRAWN arm (real robot at low override is slow)
     "self_learn": True,       # digit reader adds confident new glyph samples to its bank
     "gpu": True,              # use the OpenGL renderer when moderngl is installed
+    "show_axes": True,        # show world coordinate axes in the 3D view
+    "show_perf": True,        # show the FPS/GPU usage counter
 }
 
 # ---- theme ----
@@ -111,16 +113,38 @@ class Config:
 
 _capture_lock = threading.Lock()
 _wayland_capture = None
+_wayland_capture_source = "monitor"
 
 
-def new_mss():
-    """Capture with PipeWire portal on Wayland; use mss on other desktops."""
+def set_capture_source(source):
+    """Choose the primary Wayland portal source for the next capture session."""
+    global _wayland_capture, _wayland_capture_source
+    source = str(source).lower()
+    if source not in ("monitor", "window"):
+        raise ValueError("Capture source must be 'monitor' or 'window'.")
+    with _capture_lock:
+        if _wayland_capture is not None and source != _wayland_capture_source:
+            try: _wayland_capture.close()
+            except Exception: pass
+            _wayland_capture = None
+        _wayland_capture_source = source
+
+
+def new_mss(separate=False, source=None):
+    """Capture with PipeWire portal on Wayland; use mss on other desktops.
+
+    ``separate=True`` opens an independent screen-share session/source.
+    ``source`` selects ``monitor`` or ``window`` for Wayland portal capture.
+    """
     global _wayland_capture
     if sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY"):
+        if separate:
+            from .wayland_capture import WaylandCapture
+            return WaylandCapture(source=source or "monitor")
         with _capture_lock:
             if _wayland_capture is None:
                 from .wayland_capture import WaylandCapture
-                _wayland_capture = WaylandCapture()
+                _wayland_capture = WaylandCapture(source=source or _wayland_capture_source)
             return _wayland_capture
     import mss
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()

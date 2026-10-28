@@ -167,12 +167,12 @@ class OcrWorker(threading.Thread):
             with self.sh.lock:
                 self.sh.state = f"OCR stopped: {exc}"
 
-    def _update_cell(self, st, i, g, t0):
+    def _update_cell(self, st, i, g, t0, force_reread_s):
         _, b = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         changed = st.sig is None or st.sig.shape != b.shape or np.count_nonzero(st.sig != b) > SIG_CHANGE_FRAC * b.size
         if changed:
             st.sig = b
-        if not (changed or st.val is None or st.cand is not None or t0 - st.last_read > FORCE_REREAD_S):
+        if not (changed or st.val is None or st.cand is not None or t0 - st.last_read > force_reread_s):
             return 0
         r = digits.read_cell(g, i // 3, self.bank)
         st.last_read = t0
@@ -213,7 +213,7 @@ class OcrWorker(threading.Thread):
         while not self.stop_evt.is_set():
             t0 = clock()
             with sh.lock:
-                region, sreg, preg = sh.region, sh.status_region, sh.step_region
+                region, sreg, preg, step_level = sh.region, sh.status_region, sh.step_region, sh.step_level
             if region is None:
                 self.stop_evt.wait(0.2)
                 continue
@@ -226,9 +226,11 @@ class OcrWorker(threading.Thread):
                     sh.state = f"Screen capture failed: {exc}"
                 self.stop_evt.wait(0.5)
                 continue
+            large_step = step_level is not None and STEP_LEVELS[step_level][0] >= 5.0
+            force_reread_s = 0.0 if large_step else FORCE_REREAD_S
             for i, g in enumerate(split_cells(gray)):
                 if g.size:
-                    calls += self._update_cell(cells[i], i, g, t0)
+                    calls += self._update_cell(cells[i], i, g, t0, force_reread_s)
             busy = None
             if sreg is not None:
                 try:
@@ -261,17 +263,25 @@ class OcrWorker(threading.Thread):
                     sh.scan_rate, sh.ocr_rate = scans / (now - rate_t), calls / (now - rate_t)
                 scans = calls = 0
                 rate_t = now
-            delay = 1.0 / max(1.0, float(self.settings.get("ocr_fps", 15))) - (clock() - t0)
+            base_fps = max(1.0, float(self.settings.get("ocr_fps", 15)))
+            target_fps = max(base_fps, 30.0) if large_step else base_fps
+            delay = 1.0 / target_fps - (clock() - t0)
             if delay > 0:
                 self.stop_evt.wait(delay)
 
 
 class StepReader(threading.Thread):
     """Read the optional panel step-size text continuously, separate from pose OCR."""
-    def __init__(self, shared):
+    def __init__(self, shared, capture=None):
         super().__init__(daemon=True, name="step-ocr")
         self.sh = shared
+        self.capture = capture
+        self.capture_lock = threading.Lock()
         self.stop_evt = threading.Event()
+
+    def set_capture(self, capture):
+        with self.capture_lock:
+            self.capture = capture
 
     def stop(self):
         self.stop_evt.set()
@@ -285,11 +295,7 @@ class StepReader(threading.Thread):
         if not (os.path.isfile(cmd) or shutil.which(cmd)):
             with sh.lock: sh.step_status = "Tesseract executable not found; panel step size is not being read"
             return
-        try:
-            sct = new_mss()
-        except Exception as exc:
-            with sh.lock: sh.step_status = f"Step-size capture unavailable: {exc}"
-            return
+        fallback = None
         while not self.stop_evt.is_set():
             with sh.lock: region = sh.step_region
             if region is None:
@@ -299,7 +305,13 @@ class StepReader(threading.Thread):
                 self.stop_evt.wait(0.4)
                 continue
             try:
-                gray = cv2.cvtColor(np.asarray(sct.grab(region)), cv2.COLOR_BGRA2GRAY)
+                with self.capture_lock:
+                    capture = self.capture
+                if capture is None:
+                    if fallback is None:
+                        fallback = new_mss()
+                    capture = fallback
+                gray = cv2.cvtColor(np.asarray(capture.grab(region)), cv2.COLOR_BGRA2GRAY)
                 enlarged = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
                 _, binary = cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                 if binary.mean() < 127: binary = 255 - binary

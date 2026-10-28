@@ -1,5 +1,14 @@
 # R08 live twin v3 – FANUC R-2000iA/200F
 
+The active robot appearance is imported from
+`fanuc-r2000ia-165f.snapshot.2/FANUC_R2000iA165F.STEP` using CadQuery/OpenCascade.
+The STEP is a fused CAD assembly rather than separate joint solids. The
+existing kinematic chain drives pose calculations, and the imported envelope
+translates by the live TCP displacement so detected motion is reflected
+without pretending that the fused CAD can articulate. The complete
+tessellated assembly is retained for surface continuity and correct rendering.
+The folder's original STL is a partial component, not the complete robot.
+
 Reads the Position/Angle table off the stream, shows a live 3D twin, and guides you click-by-click on the jog panel.
 
 ## Install & run
@@ -20,8 +29,11 @@ the panel button positions, then approve KDE's pointer permission prompt for
 each run. The click interval is configurable; automation pauses if the screen
 reader cannot verify an action. Install the KDE portal backend (`xdg-desktop-portal-kde`)
 and libportal Xdp introspection bindings for your distribution.
-Full setup now asks for the panel's step-size text region. The step OCR worker
-reads it continuously (about twice per second) and syncs the selected jog size.
+Full setup now asks for the panel's step-size text region on the movement-panel
+capture. The step OCR worker reads it continuously (about twice per second) and
+syncs the selected jog size.
+While a coarse jog step is selected, the position reader increases its sampling
+rate and rereads all six positions so large movements are not skipped.
 Install `pytesseract` and the Tesseract system executable for that feature and
 for automatic panel-button recognition; manual button setup remains available.
 On X11, Windows, and macOS the app continues to use `mss` directly.

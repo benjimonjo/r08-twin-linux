@@ -1,6 +1,4 @@
 r08_config.json
 r08_digits.npz
-r08/__pycache__/model3d.cpython-314.pyc
-r08/__pycache__/qt_ui.cpython-314.pyc
-r08/__pycache__/render.cpython-314.pyc
-r08/__pycache__/ui.cpython-314.pyc
+r08/__pycache__/
+r08/__pycache__/common.cpython-314.pyc

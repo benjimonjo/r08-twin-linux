@@ -12,6 +12,10 @@ from .common import C, nice_btn, new_mss
 from .inputs import WAYLAND_SESSION
 
 STAGE_DEFS = {   # key: (kind, title, hint, optional, short label)
+    "camera_region": ("rect", "Drag a box around the Discord camera video",
+                      "Select the video only. This region is used for either stream camera; pan, tilt, and zoom appear live as the feed changes.", False, "camera"),
+    "button_region": ("rect", "Drag a box around the robot movement controls",
+                      "Select the controls panel only. Button detection and relative-position tracking use this crop, separately from the camera video crop.", False, "controls"),
     "region": ("rect", "Drag a box around the six numbers",
                "Just the 2 \u00d7 3 grid of values. Leave out the \u2018Position / Angle\u2019 and X Y Z labels, then press Enter.", False, "numbers"),
     "pos_tl": ("point", "Click the X+ button", "Top-left button of the Position block on the jog panel.", False, "X+"),
@@ -26,7 +30,7 @@ STAGE_DEFS = {   # key: (kind, title, hint, optional, short label)
     "status": ("rect", "Drag a box around the coloured IDLE / MOVING banner",
                "Optional. Lets me see exactly when the robot has stopped.  Esc skips this.", True, "banner"),
     "step_label": ("rect", "Drag a box around the \u2018Step size: \u2026\u2019 text",
-                   "Required for continuous panel step-size reading (needs Tesseract).  Esc cancels setup.", False, "step text"),
+                   "Select this on the movement-panel capture. It is required for continuous step-size reading (needs Tesseract). Esc cancels setup.", False, "step text"),
 }
 BUTTON_KEYS = ["pos_tl", "pos_br", "ang_tl", "ang_br", "step_plus", "step_minus", "abort", "review"]
 ALL_KEYS = ["region"] + BUTTON_KEYS + ["status", "step_label"]

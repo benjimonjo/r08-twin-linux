@@ -55,7 +55,10 @@ void main(){ v_col=in_col; gl_Position = mvp*vec4(in_pos,1.0); }
 LFS = """#version 330
 in vec3 v_col; out vec4 f_col; void main(){ f_col = vec4(v_col,1.0); }
 """
-MAX_VERTS = 80000
+# The imported STEP assembly contains about 480k vertices. Keep the complete
+# triangle soup so adjacent faces remain connected; dropping arbitrary faces
+# produces the spiky/wireframe appearance of a broken mesh.
+MAX_VERTS = 600000
 MAX_SPLATS = 120000
 
 SPLAT_VS = """#version 330
@@ -269,7 +272,12 @@ class CPUBackend:
         N = nrm.reshape(nt, 3, 3).mean(axis=1)
         N /= np.linalg.norm(N, axis=1, keepdims=True) + 1e-12
         to_eye = view.eye - cen
-        ok = (np.einsum("ij,ij->i", N, to_eye) > 0) & (depth.min(axis=1) > 0.12)
+        # STEP solids do not necessarily share a consistent winding order.
+        # Render both sides and orient normals toward the camera for shading,
+        # as the OpenGL fragment shader does.
+        facing = np.einsum("ij,ij->i", N, to_eye) < 0
+        N[facing] *= -1
+        ok = depth.min(axis=1) > 0.12
         idx = np.nonzero(ok)[0]
         if len(idx) == 0:
             return
@@ -405,6 +413,29 @@ def draw_overlay(img, v, fr):
             put_text(img, hud["tip_text"], (int(np.clip(x, 6, w - tw - 8)), int(np.clip(y, 18, h - 8))), 0.46)
     if hud.get("ghost_text"):
         put_text(img, hud["ghost_text"], (14, 26), 0.5, hex_rgb(C.green))
+    camera_view = hud.get("camera_view") if hud.get("gaussian_splats") else None
+    if camera_view is not None and camera_view.size:
+        # A single stream frame has no depth, so present it honestly as a
+        # camera-facing Gaussian point image alongside the reconstructed model.
+        panel_w = min(340, max(180, w // 3))
+        panel_h = max(80, int(panel_w * camera_view.shape[0] / max(1, camera_view.shape[1])))
+        title_h, margin = 24, 8
+        if panel_h + title_h + margin * 2 < h:
+            small = cv2.resize(camera_view, (panel_w, panel_h), interpolation=cv2.INTER_AREA)
+            cloud = np.zeros_like(small)
+            spacing = 4
+            ys = np.arange(spacing // 2, panel_h, spacing)
+            xs = np.arange(spacing // 2, panel_w, spacing)
+            cloud[ys[:, None], xs[None, :]] = small[ys[:, None], xs[None, :]]
+            cloud = cv2.GaussianBlur(cloud, (0, 0), 1.5)
+            x, y = w - panel_w - margin, title_h + margin
+            x2, y2 = x + panel_w, y + panel_h + title_h
+            img[y:y2, x:x2] = (img[y:y2, x:x2].astype(np.float32) * 0.28).astype(np.uint8)
+            img[y + title_h:y2, x:x2] = np.clip(
+                img[y + title_h:y2, x:x2].astype(np.float32) * 0.25 + cloud.astype(np.float32) * 0.75,
+                0, 255).astype(np.uint8)
+            cv2.rectangle(img, (x, y), (x2 - 1, y2 - 1), (80, 90, 105), 1, cv2.LINE_AA)
+            put_text(img, hud.get("camera_name", "Discord camera"), (x + 6, y + 17), 0.42, (225, 230, 240))
     if hud.get("msg"):
         tw = cv2.getTextSize(hud["msg"], FONT, 0.7, 2)[0][0]
         put_text(img, hud["msg"], ((w - tw) // 2, h // 2), 0.7, (200, 205, 215), 2)

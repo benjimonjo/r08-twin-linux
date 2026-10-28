@@ -23,20 +23,23 @@ class _Shot:
 
 class WaylandCapture:
     """ScreenCast portal + PipeWire capture, with mss-compatible grab()."""
-    def __init__(self):
+    def __init__(self, source="monitor"):
         try:
             import gi
             gi.require_version("Gst", "1.0")
             gi.require_version("Xdp", "1.0")
             from gi.repository import Gst
-            from gi.repository import GLib, Xdp
+            from gi.repository import Gio, GLib, Xdp
         except Exception as exc:
             raise RuntimeError(
                 "Wayland capture needs PyGObject, libportal's Xdp introspection "
                 "bindings, and GStreamer's PipeWire plugin (pipewiresrc). Install "
                 "the corresponding system packages for your Linux distribution."
             ) from exc
-        self.Gst, self.GLib, self.Xdp = Gst, GLib, Xdp
+        self.Gst, self.Gio, self.GLib, self.Xdp = Gst, Gio, GLib, Xdp
+        self.source = str(source).lower()
+        if self.source not in ("monitor", "window"):
+            raise ValueError("Wayland capture source must be 'monitor' or 'window'.")
         Gst.init(None)
         self._lock = threading.Lock()
         self._frame = None
@@ -49,9 +52,14 @@ class WaylandCapture:
 
     def _start_portal(self):
         Gst = self.Gst
-        loop = self.GLib.MainLoop()
-        portal = self.Xdp.Portal.new()
+        # Portal setup runs in a capture QThread. Give its Gio async callbacks
+        # a private GLib context instead of sharing the process-wide default
+        # context with Qt's event dispatcher.
+        context = self.GLib.MainContext.new()
+        context.push_thread_default()
+        loop = self.GLib.MainLoop.new(context, False)
         failure = []
+        cancellable = self.Gio.Cancellable.new()
 
         def started(session, result, _data=None):
             try:
@@ -61,6 +69,8 @@ class WaylandCapture:
                 if not streams:
                     raise RuntimeError("The portal did not return a selected screen stream.")
                 self._node_id, props = streams[0]
+                # Window streams may omit compositor position; their regions
+                # are addressed from the window's top-left corner.
                 self._monitor_left, self._monitor_top = props.get("position", (0, 0))
                 self._pw_fd = session.open_pipewire_remote()
                 if self._pw_fd < 0:
@@ -75,21 +85,45 @@ class WaylandCapture:
                 session = portal_obj.create_screencast_session_finish(result)
                 if session is None:
                     raise RuntimeError("The desktop portal did not create a screen sharing session.")
-                session.start(None, None, started, None)
+                session.start(None, cancellable, started, None)
             except Exception as exc:
                 failure.append(exc)
                 loop.quit()
 
         try:
+            portal = self.Xdp.Portal.new()
+            # Ask KDE for the standard chooser with both tabs available. Some
+            # portal backends suppress the chooser or provide an empty list
+            # when only WINDOW is requested; the monitor-only path stays
+            # explicit for normal screen capture.
+            output_type = (self.Xdp.OutputType.MONITOR | self.Xdp.OutputType.WINDOW
+                           if self.source == "window" else self.Xdp.OutputType.MONITOR)
+
+            timeout_fired = []
+            def portal_timeout():
+                timeout_fired.append(True)
+                failure.append(RuntimeError(
+                "The desktop portal did not answer. Its screen/window picker may be hidden or unavailable; "
+                    "check that xdg-desktop-portal-kde is running, then retry."
+                ))
+                cancellable.cancel()
+                loop.quit()
+                return False
+
+            timeout_id = self.GLib.timeout_add_seconds(90, portal_timeout)
             portal.create_screencast_session(
-                self.Xdp.OutputType.MONITOR,
+                output_type,
                 self.Xdp.ScreencastFlags(0),
                 self.Xdp.CursorMode.EMBEDDED,
                 self.Xdp.PersistMode.TRANSIENT,
-                None, None, created, None)
+                None, cancellable, created, None)
             loop.run()
         except Exception as exc:
             raise RuntimeError(f"Could not open the desktop screen sharing portal: {exc}") from exc
+        finally:
+            if "timeout_id" in locals() and not timeout_fired:
+                self.GLib.source_remove(timeout_id)
+            context.pop_thread_default()
         if failure:
             raise RuntimeError(f"Wayland screen capture could not start: {failure[0]}") from failure[0]
 
@@ -116,7 +150,7 @@ class WaylandCapture:
                 shape = None if self._frame is None else self._frame.shape
             if shape:
                 self.monitors = [{"left": self._monitor_left, "top": self._monitor_top,
-                                  "width": shape[1], "height": shape[0]}]
+                                  "width": shape[1], "height": shape[0], "source": self.source}]
                 return
             threading.Event().wait(0.05)
         raise RuntimeError("The portal granted screen sharing but no PipeWire video frames arrived.")

@@ -19,15 +19,38 @@ Public API:
     table_to_base(p_inches) -> point in base frame (metres)
 """
 import math
+import os
 import numpy as np
-from .common import IN
+from .common import IN, wrap180
 
-J2_HEIGHT = 0.71
-JOINT_ORIGINS = np.array([[0.0, 0, J2_HEIGHT], [0.312, 0, 0], [0, 0, 1.075], [0, 0, 0.225], [1.096, 0, 0], [0, 0, 0]])
-JOINT_AXES = np.array([[0.0, 0, 1], [0, 1, 0], [0, -1, 0], [-1, 0, 0], [0, -1, 0], [-1, 0, 0]])
-FLANGE_OFFSET_M = np.array([0.175, 0.0, 0.0])
+MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "FANUC_R2000iA_200F_model")
+_MODEL_DATA = {
+    "nominal_joint_origins_m": {
+        "J1": [0.0, 0.0, 0.9], "J2": [0.0, 0.0, 0.175],
+        "J3": [1.11, 0.0, 0.0], "J4": [1.075, 0.0, 0.0],
+        "J5": [0.298, 0.0, 0.0], "J6": [0.2, 0.0, 0.0],
+    },
+    "joint_limits": [
+        {"range_deg": [-360.0, 360.0], "axis": [0, 0, 1]},
+        {"range_deg": [-67.5, 67.5], "axis": [0, 1, 0]},
+        {"range_deg": [-183.7, 183.7], "axis": [0, 1, 0]},
+        {"range_deg": [-360.0, 360.0], "axis": [1, 0, 0]},
+        {"range_deg": [-125.0, 125.0], "axis": [0, 1, 0]},
+        {"range_deg": [-360.0, 360.0], "axis": [1, 0, 0]},
+    ],
+}
+_model_data_path = os.path.join(MODEL_DIR, "kinematics.json")
+if os.path.isfile(_model_data_path):
+    import json
+    with open(_model_data_path, encoding="utf-8") as _fh:
+        _MODEL_DATA = json.load(_fh)
+J2_HEIGHT = float(_MODEL_DATA["nominal_joint_origins_m"]["J1"][2])
+JOINT_ORIGINS = np.array([_MODEL_DATA["nominal_joint_origins_m"][f"J{i}"] for i in range(1, 7)], float)
+JOINT_AXES = np.array([item["axis"] for item in _MODEL_DATA["joint_limits"]], float)
+FLANGE_OFFSET_M = np.zeros(3)
 # wide on purpose: the real robot decides, the twin only has to follow
-JOINT_LIMITS_DEG = np.array([[-180, 180], [-100, 160], [-180, 180], [-360, 360], [-135, 135], [-360, 360]], float)
+INFINITE_JOINTS = (3, 5)
+JOINT_LIMITS_DEG = np.array([item["range_deg"] for item in _MODEL_DATA["joint_limits"]], float)
 JOINT_LIMITS_RAD = np.radians(JOINT_LIMITS_DEG)
 
 POSITION_UNIT_TO_METERS = 0.0254
@@ -69,10 +92,7 @@ def thick_axis():
 
 
 def tool_local_tip():
-    loc = np.zeros(3)
-    loc[0] = SPIKES_IN[TCP_SPIKE][0] * IN
-    loc[TOOL["axis"]] = TOOL["sign"] * SPIKES_IN[TCP_SPIKE][1] * IN
-    return loc
+    return np.zeros(3)
 
 
 def forward_kinematics(q):
@@ -125,6 +145,18 @@ def rotation_error_vector(cur, tgt):
 
 def clamp_q(q):
     return np.clip(np.asarray(q, float), JOINT_LIMITS_RAD[:, 0], JOINT_LIMITS_RAD[:, 1])
+
+
+def unwrap_q_to_reference(q, reference):
+    q = np.asarray(q, float).copy()
+    if reference is None:
+        for i in INFINITE_JOINTS:
+            q[i] = math.radians(wrap180(math.degrees(q[i])))
+        return q
+    reference = np.asarray(reference, float)
+    for i in INFINITE_JOINTS:
+        q[i] = reference[i] + math.radians(wrap180(math.degrees(q[i] - reference[i])))
+    return q
 
 
 def solve_ik_once(target, seed):
@@ -181,11 +213,13 @@ def solve_ik(target, previous=None):
     """Try the previous solution first (cheap, continuous); fall back to a multi-seed search."""
     if previous is not None:
         q, pe, re = solve_ik_once(target, previous)
+        q = unwrap_q_to_reference(q, previous)
         if pe * 1000 <= GOOD_POSITION_ERROR_MM and math.degrees(re) <= GOOD_ORIENTATION_ERROR_DEG:
             return q, pe, re
     best = None
     for seed in make_ik_seeds(target, previous):
         q, pe, re = solve_ik_once(target, seed)
+        q = unwrap_q_to_reference(q, previous)
         score = pe * 1000 + math.degrees(re) * 2 + joint_distance(q, previous) * 0.01
         if best is None or score < best[0]:
             best = (score, q, pe, re)

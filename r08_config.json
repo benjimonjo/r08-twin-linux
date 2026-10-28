@@ -12,88 +12,90 @@
     "ocr_fps": 15,
     "viz_deg_s": 25.0,
     "self_learn": true,
-    "gpu": true
+    "gpu": true,
+    "show_axes": false,
+    "show_perf": true
   },
   "level": 2,
   "region": {
-    "left": 502,
-    "top": 1088,
-    "width": 246,
-    "height": 65
+    "left": 500,
+    "top": 278,
+    "width": 247,
+    "height": 58
   },
   "status": {
-    "left": 394,
-    "top": 1028,
-    "width": 364,
-    "height": 32
+    "left": 399,
+    "top": 214,
+    "width": 359,
+    "height": 33
   },
   "buttons": {
     "X+": [
-      1591.0,
-      1208.0
+      550.0,
+      361.0
     ],
     "X-": [
-      1591.0,
-      1250.0
+      550.0,
+      397.0
     ],
     "Y+": [
-      1660.0,
-      1208.0
+      618.5,
+      361.0
     ],
     "Y-": [
-      1660.0,
-      1250.0
+      618.5,
+      397.0
     ],
     "Z+": [
-      1729.0,
-      1208.0
+      687.0,
+      361.0
     ],
     "Z-": [
-      1729.0,
-      1250.0
+      687.0,
+      397.0
     ],
     "Xa+": [
-      1591.0,
-      1322.0
+      550.0,
+      473.0
     ],
     "Xa-": [
-      1591.0,
-      1360.0
+      550.0,
+      508.0
     ],
     "Ya+": [
-      1659.5,
-      1322.0
+      615.5,
+      473.0
     ],
     "Ya-": [
-      1659.5,
-      1360.0
+      615.5,
+      508.0
     ],
     "Za+": [
-      1728.0,
-      1322.0
+      681.0,
+      473.0
     ],
     "Za-": [
-      1728.0,
-      1360.0
+      681.0,
+      508.0
     ],
     "Step+": [
-      1589.0,
-      1458.0
+      545.0,
+      610.0
     ],
     "Step-": [
-      1655.0,
-      1460.0
+      619.0,
+      608.0
     ],
     "Abort": [
-      1602.0,
-      1493.0
+      546.0,
+      652.0
     ]
   },
   "step": {
-    "left": 1554,
-    "top": 1414,
+    "left": 517,
+    "top": 566,
     "width": 243,
-    "height": 15
+    "height": 16
   },
   "objects": [
     {
@@ -119,6 +121,86 @@
       "t": 0.5
     }
   ],
-  "click_interval": 3.0,
-  "auto_input": false
+  "click_interval": 2.0,
+  "auto_input": true,
+  "camera_region": null,
+  "button_panel": {
+    "rect": {
+      "left": 521.0,
+      "top": 337.0,
+      "width": 191,
+      "height": 340
+    },
+    "relative": {
+      "X+": [
+        0.1518324607329843,
+        0.07058823529411765
+      ],
+      "X-": [
+        0.1518324607329843,
+        0.17647058823529413
+      ],
+      "Y+": [
+        0.5104712041884817,
+        0.07058823529411765
+      ],
+      "Y-": [
+        0.5104712041884817,
+        0.17647058823529413
+      ],
+      "Z+": [
+        0.8691099476439791,
+        0.07058823529411765
+      ],
+      "Z-": [
+        0.8691099476439791,
+        0.17647058823529413
+      ],
+      "Xa+": [
+        0.1518324607329843,
+        0.4
+      ],
+      "Xa-": [
+        0.1518324607329843,
+        0.5029411764705882
+      ],
+      "Ya+": [
+        0.49476439790575916,
+        0.4
+      ],
+      "Ya-": [
+        0.49476439790575916,
+        0.5029411764705882
+      ],
+      "Za+": [
+        0.837696335078534,
+        0.4
+      ],
+      "Za-": [
+        0.837696335078534,
+        0.5029411764705882
+      ],
+      "Step+": [
+        0.1256544502617801,
+        0.8029411764705883
+      ],
+      "Step-": [
+        0.5130890052356021,
+        0.7970588235294118
+      ],
+      "Abort": [
+        0.13089005235602094,
+        0.9264705882352942
+      ]
+    },
+    "template": "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"
+  },
+  "button_region": {
+    "left": 499,
+    "top": 206,
+    "width": 353,
+    "height": 721
+  },
+  "capture_source": "window",
+  "button_capture_source": "window"
 }
