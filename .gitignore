@@ -3,3 +3,4 @@ r08_digits.npz
 r08/__pycache__/
 r08/__pycache__/common.cpython-314.pyc
 r08_config.json
+__pycache__/
