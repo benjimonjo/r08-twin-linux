@@ -420,15 +420,45 @@ def detect_panel_buttons(capture, button_region=None):
         headed_rows = [item for item in camera_step_rows if item[5] > heading_y + 18]
         camera_step_rows = headed_rows
     if camera_step_rows:
-        item = min(camera_step_rows, key=lambda value: value[5])
-        half = item[2] / 2
-        plus = (item[0], item[1], half - 2, item[3],
-                item[0] + (half - 2) / 2, item[5])
-        minus_x = item[0] + half + 2
-        minus = (minus_x, item[1], half - 2, item[3],
-                 minus_x + (half - 2) / 2, item[5])
-        remember("Camera Step+", plus)
-        remember("Camera Step-", minus)
+        # A single wide contour is not enough evidence: splitting it can put
+        # Camera Step+ on the Camera Step- button. Require two distinct
+        # controls, preferably identified by their green/red button colors.
+        row = min(camera_step_rows, key=lambda value: value[5])
+        row_y = row[5]
+        same_row = sorted(
+            [item for item in camera_step_rows if abs(item[5] - row_y) <= 12],
+            key=lambda value: value[4])
+        if len(same_row) >= 2:
+            remember("Camera Step+", same_row[0])
+            remember("Camera Step-", same_row[-1])
+
+    def find_camera_step_colors():
+        candidates = []
+        for item in controls:
+            if item[5] <= camera_step_floor or item[2] < 20 or item[3] < 8:
+                continue
+            px, py = round(item[4]), round(item[5])
+            if not (0 <= px < hsv.shape[1] and 0 <= py < hsv.shape[0]):
+                continue
+            hue, saturation, value = hsv[py, px]
+            kind = "plus" if 35 <= int(hue) <= 95 else "minus" if int(hue) <= 15 or int(hue) >= 165 else None
+            if kind:
+                candidates.append((kind, item))
+        greens = [item for kind, item in candidates if kind == "plus"]
+        reds = [item for kind, item in candidates if kind == "minus"]
+        if not greens or not reds:
+            return None
+        pair = min(
+            ((green, red) for green in greens for red in reds
+             if abs(green[5] - red[5]) <= 18 and green[4] < red[4]),
+            key=lambda pair: abs(pair[0][5] - pair[1][5]) + abs(pair[0][4] - pair[1][4]),
+            default=None)
+        return pair
+
+    color_pair = find_camera_step_colors()
+    if color_pair is not None:
+        remember("Camera Step+", color_pair[0])
+        remember("Camera Step-", color_pair[1])
 
     # OCR identifies the two irregular camera actions; a color-only fallback
     # uses their stable placement below the camera grid.
@@ -500,6 +530,13 @@ def detect_panel_buttons(capture, button_region=None):
         # Prefer the color-crop result (confidence 100) when available.
         if name not in found or confidence > found[name][1]: found[name] = (point, confidence)
 
+    # Re-apply the color-identified camera pair after OCR so a misread
+    # "Camera Step+" token cannot move the plus marker onto the red minus
+    # button.
+    if color_pair is not None:
+        remember("Camera Step+", color_pair[0])
+        remember("Camera Step-", color_pair[1])
+
     # The compact safe-position card often renders both labels as one OCR
     # token, and the J in J456 may be read as a 1. Re-read that card at a
     # larger scale so the two distinct safe buttons cannot collapse together.
@@ -527,6 +564,36 @@ def detect_panel_buttons(capture, button_region=None):
                 120,
             )
     return monitor, image, {name: value[0] for name, value in found.items()}
+
+
+def detect_step_label_region(image_bgra, monitor):
+    """Find the first arm-panel 'Step size:' line for continuous OCR."""
+    gray = cv2.cvtColor(image_bgra, cv2.COLOR_BGRA2GRAY)
+    enlarged = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    data = pytesseract.image_to_data(
+        enlarged, config="--oem 3 --psm 11",
+        output_type=pytesseract.Output.DICT, timeout=8)
+    words = []
+    for i, text in enumerate(data["text"]):
+        token = re.sub(r"[^a-z]", "", text.lower())
+        if token not in {"step", "size"}:
+            continue
+        words.append((
+            int(data["left"][i]) / 3, int(data["top"][i]) / 3,
+            int(data["width"][i]) / 3, int(data["height"][i]) / 3))
+    if not words:
+        return None
+    top = min(item[1] for item in words)
+    line = [item for item in words if abs(item[1] - top) <= 24]
+    left = max(0, min(item[0] for item in line) - 12)
+    right = min(image_bgra.shape[1], max(item[0] + item[2] for item in line) + 180)
+    bottom = min(image_bgra.shape[0], max(item[1] + item[3] for item in line) + 12)
+    return {
+        "left": int(monitor["left"] + left),
+        "top": int(monitor["top"] + top - 8),
+        "width": max(1, int(right - left)),
+        "height": max(1, int(bottom - top + 8)),
+    }
 
 
 def make_button_panel_calibration(image_bgra, monitor, buttons):
@@ -879,6 +946,9 @@ class QtApp:
         self.step_reader = StepReader(self.shared, self.button_capture); self.step_reader.start()
         self.capture_init_worker = None
         self.capture_init_purpose = None
+        self.portal_selection_hint = None
+        self.auto_recognition_after_region = False
+        self.startup_capture_started = False
         self.pending_setup_keys = None
         self.setup_queue = []
         self._interrupt_requested = False
@@ -906,11 +976,58 @@ class QtApp:
         self.stop_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Escape), self.window)
         self.stop_shortcut.activated.connect(self._stop_guided_move)
         self.timer = QtCore.QTimer(self.window); self.timer.timeout.connect(self._tick); self.timer.start(33)
-        if not self.cfg.get("region"):
-            QtCore.QTimer.singleShot(500, lambda: self.run_setup(ALL_KEYS))
+        QtCore.QTimer.singleShot(500, self._start_startup_captures)
         self.log(f"R08 live twin started. 3D: {self.renderer.name}.")
         if self.render_note: self.log(self.render_note)
         self.log("Native Wayland UI: manual guidance is available; optional pointer automation uses the KDE RemoteDesktop portal.")
+
+    def _start_startup_captures(self):
+        if self.startup_capture_started or self.capture_init_worker is not None:
+            return
+        self.startup_capture_started = True
+        self.log("Preparing startup capture: main R08 stream first, movement-controls stream second.")
+        if self.capture is None:
+            source = self.capture_source
+            detail = ("Choose the window containing the number table and camera stream."
+                      if source == "window" else
+                      "Choose the monitor containing the number table and camera stream.")
+            self.portal_selection_hint = self._show_portal_selection_hint(
+                "Select main R08 capture",
+                "Choose the primary R08 screen share.",
+                detail)
+            self.capture_init_purpose = "startup_stream"
+            self.capture_init_worker = CaptureInitWorker(
+                separate=False, source=source,
+                restore_token=self._capture_restore_token(False, source),
+                parent=self.window)
+            self.capture_init_worker.finished_result.connect(self._capture_init_finished)
+            self.capture_init_worker.start()
+            self.log("Opening the main screen-share chooser. Select the number table and camera stream…")
+            return
+        self.log("Main R08 capture already active; continuing to movement-controls capture.")
+        self._start_startup_button_capture()
+
+    def _start_startup_button_capture(self):
+        if self.button_capture is not None:
+            if not self.cfg.get("region"):
+                self.run_setup(ALL_KEYS)
+            return
+        source = self.cfg.get("button_capture_source", "monitor")
+        detail = ("Choose the Discord window containing the movement controls, not the camera-only window."
+                  if source == "window" else
+                  "Choose the monitor containing the movement controls.")
+        self.portal_selection_hint = self._show_portal_selection_hint(
+            "Select movement controls",
+            "Choose the separate movement-controls screen share.",
+            detail)
+        self.capture_init_purpose = "startup_button"
+        self.capture_init_worker = CaptureInitWorker(
+            separate=True, source=source,
+            restore_token=self._capture_restore_token(True, source),
+            parent=self.window)
+        self.capture_init_worker.finished_result.connect(self._capture_init_finished)
+        self.capture_init_worker.start()
+        self.log("Opening the movement-controls screen-share chooser…")
 
     def _build(self):
         central = QtWidgets.QWidget(); self.window.setCentralWidget(central)
@@ -1798,6 +1915,39 @@ class QtApp:
             return snap.step_level is not None and snap.step_level == action.level
         return False
 
+    def _show_portal_selection_hint(self, title, instruction, detail):
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle(title)
+        dialog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+        dialog.setWindowFlags(
+            QtCore.Qt.WindowType.Dialog |
+            QtCore.Qt.WindowType.WindowStaysOnTopHint)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        label = QtWidgets.QLabel(f"<b>{instruction}</b><br><br>{detail}<br><br>"
+                                 "Press Continue, then make the selection in KDE.")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("Continue")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.adjustSize()
+        window_rect = self.window.frameGeometry()
+        screen = QtGui.QGuiApplication.screenAt(window_rect.center())
+        available = screen.availableGeometry() if screen else QtGui.QGuiApplication.primaryScreen().availableGeometry()
+        x = window_rect.right() + 12
+        if x + dialog.width() > available.right():
+            x = max(available.left(), window_rect.left() - dialog.width() - 12)
+        y = max(available.top(), min(window_rect.top(), available.bottom() - dialog.height()))
+        dialog.move(x, y)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
     def _start_automated_move(self):
         buttons = self.cfg.get("buttons", {}) or {}
         window_source = self.cfg.get("button_capture_source", "monitor") == "window"
@@ -1813,6 +1963,10 @@ class QtApp:
             if self.capture_init_worker and self.capture_init_worker.isRunning():
                 self.log("Waiting for the current screen-share selection to finish before automated input.")
                 return
+            self.portal_selection_hint = self._show_portal_selection_hint(
+                    "Select movement controls",
+                    "Choose the Discord window containing the robot movement controls.",
+                    "Do not choose the camera-only window. This selection is used to locate and calibrate the buttons.")
             self.capture_init_purpose = "automated_input"
             self.capture_init_worker = CaptureInitWorker(
                 separate=True,
@@ -1829,9 +1983,16 @@ class QtApp:
             if self.capture_init_worker and self.capture_init_worker.isRunning():
                 self.log("Waiting for the current screen-share selection to finish before automated input.")
                 return
+            self.portal_selection_hint = self._show_portal_selection_hint(
+                    "Select pointer workspace",
+                    "Choose the full workspace monitor containing the movement-control window.",
+                    "R08 needs the monitor/workspace stream for pointer coordinates. Do not select a window here.")
             self.capture_init_purpose = "automated_pointer"
             self.capture_init_worker = CaptureInitWorker(
-                separate=True, source="window" if window_source else "monitor",
+                # KDE currently returns the full virtual desktop for a
+                # RemoteDesktop WINDOW request. Use a monitor stream and
+                # locate the calibrated panel with its saved template.
+                separate=True, source="monitor",
                 # Do not restore the pointer window token. KDE can associate
                 # a restored window token with a different video window after
                 # Discord recreates its panels, so pointer input must always
@@ -1841,7 +2002,7 @@ class QtApp:
                 parent=self.window)
             self.capture_init_worker.finished_result.connect(self._capture_init_finished)
             self.capture_init_worker.start()
-            self.log("Select the control-panel window for pointer input (do not select the camera window)…" if window_source else
+            self.log("Select the monitor containing the movement-control window so R08 can locate it for pointer input…" if window_source else
                      "Select the monitor containing that window so R08 can map its controls to desktop clicks…")
             return
         answer = QtWidgets.QMessageBox.warning(
@@ -1866,17 +2027,20 @@ class QtApp:
                 if not points:
                     raise RuntimeError("The calibrated panel has no usable button coordinates.")
                 anchor = (float(points[0][0]), float(points[0][1]))
-            containing = [
-                m for m in monitors
-                if float(m["left"]) <= anchor[0] < float(m["left"]) + float(m["width"])
-                and float(m["top"]) <= anchor[1] < float(m["top"]) + float(m["height"])
-            ]
-            if not containing:
-                raise RuntimeError(
-                    f"The calibrated movement panel at {anchor[0]:.0f},{anchor[1]:.0f} "
-                    "is not on any currently captured monitor. Re-run panel setup."
-                )
-            monitor = containing[0]
+            if window_source:
+                monitor = monitors[0]
+            else:
+                containing = [
+                    m for m in monitors
+                    if float(m["left"]) <= anchor[0] < float(m["left"]) + float(m["width"])
+                    and float(m["top"]) <= anchor[1] < float(m["top"]) + float(m["height"])
+                ]
+                if not containing:
+                    raise RuntimeError(
+                        f"The calibrated movement panel at {anchor[0]:.0f},{anchor[1]:.0f} "
+                        "is not on any currently captured monitor. Re-run panel setup."
+                    )
+                monitor = containing[0]
             if window_source:
                 # The pointer portal may return a different window even when
                 # the chooser was opened on the correct screen. Verify the
@@ -1898,7 +2062,7 @@ class QtApp:
         except Exception as exc:
             message = str(exc)
             if window_source:
-                message += "\n\nKDE selected the wrong window. Restart automated input and select the movement-control panel window, not the camera window."
+                message += "\n\nR08 could not locate the calibrated movement panel on the selected monitor. Restart automated input and select the monitor containing the movement-control window."
                 try:
                     capture.close()
                 except Exception:
@@ -1913,7 +2077,7 @@ class QtApp:
         self.wayland_pointer = WaylandPointer(
             monitor,
             lambda ok, message: self.portal_signals.ready.emit(ok, message),
-            output_type="window" if window_source else "monitor")
+            output_type="monitor")
 
     def _on_input_ready(self, ok, message):
         if not self.automated_run:
@@ -2127,6 +2291,15 @@ class QtApp:
         if not ok:
             QtWidgets.QMessageBox.warning(self.window, "Button recognition failed", str(result)); return
         self.button_capture, (monitor, image, detected) = result
+        step_region = detect_step_label_region(image, monitor)
+        if step_region is not None:
+            self.cfg.set("step", step_region)
+            self.cfg.save()
+            self.shared.set_regions(step=step_region, keep=True)
+            self.step_reader.set_capture(self.button_capture)
+            self.log("Recognized the arm step-size text region automatically.")
+        else:
+            self.log("Arm step-size text was not recognized; use Step-size text region setup.")
         if not detected:
             QtWidgets.QMessageBox.information(self.window, "Button recognition", "No panel button labels were detected. Move the R08 window away, ensure the panel is visible, or use manual panel setup.")
             return
@@ -2256,6 +2429,18 @@ class QtApp:
                 if self.capture_init_worker and self.capture_init_worker.isRunning():
                     self.log("Waiting for the current screen-share selection to finish.")
                     return
+                if separate:
+                    source = self.cfg.get("button_capture_source", "monitor")
+                    if source == "window":
+                        self.portal_selection_hint = self._show_portal_selection_hint(
+                            "Select movement controls",
+                            "Choose the Discord window containing the robot movement controls.",
+                            "Do not choose the camera-only window.")
+                    else:
+                        self.portal_selection_hint = self._show_portal_selection_hint(
+                            "Select movement-control monitor",
+                            "Choose the monitor containing the robot movement controls.",
+                            "The controls must be visible in the selected monitor.")
                 self.pending_setup_keys = list(keys)
                 self.capture_init_purpose = "setup_button" if separate else "setup_stream"
                 self.capture_init_worker = CaptureInitWorker(
@@ -2285,6 +2470,8 @@ class QtApp:
     def _open_setup_dialog(self, keys, capture):
         dlg = SetupPicker(self.window, keys, capture)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted or not dlg.result_data:
+            if self.auto_recognition_after_region and keys == ["button_region"]:
+                self.auto_recognition_after_region = False
             self.setup_queue.clear()
             return
         result = dlg.result_data
@@ -2300,6 +2487,11 @@ class QtApp:
         self.log("Setup saved.")
         if "region" in result: self.log("Tip: teach a few digits so the reader learns the stream font.")
         self._refresh()
+        if self.auto_recognition_after_region and "button_region" in result:
+            self.auto_recognition_after_region = False
+            self.log("Controls region saved. Starting automatic button recognition…")
+            self._recognize_buttons()
+            return
         if self.setup_queue:
             QtCore.QTimer.singleShot(0, self._run_next_setup)
 
@@ -2312,13 +2504,21 @@ class QtApp:
         self.capture_init_worker = None; self.capture_init_purpose = None
         if not ok:
             self.pending_setup_keys = None; self.setup_queue.clear()
+            if self.portal_selection_hint is not None:
+                self.portal_selection_hint.close()
+                self.portal_selection_hint.deleteLater()
+                self.portal_selection_hint = None
             if purpose == "camera_capture":
                 self.camera_capture_error_time = clock()
                 self.log(f"Discord camera capture failed: {result}")
             else:
                 QtWidgets.QMessageBox.warning(self.window, "Screen share unavailable", str(result))
             return
-        if purpose in ("setup_button", "automated_input"):
+        if self.portal_selection_hint is not None:
+            self.portal_selection_hint.close()
+            self.portal_selection_hint.deleteLater()
+            self.portal_selection_hint = None
+        if purpose in ("setup_button", "automated_input", "startup_button"):
             self.button_capture = result
             self._save_capture_restore_token(
                 result, True, self.cfg.get("button_capture_source", "monitor"))
@@ -2328,6 +2528,25 @@ class QtApp:
         else:
             self.capture = result
             self._save_capture_restore_token(result, False)
+        if purpose == "startup_stream":
+            self.log("Main R08 capture ready.")
+            self._start_startup_button_capture()
+            return
+        if purpose == "startup_button":
+            self.log("Movement-controls capture ready.")
+            if self.cfg.get("button_capture_source", "monitor") == "window":
+                self.auto_recognition_after_region = True
+                self.log("Select the movement-controls region for automatic recognition…")
+                self.run_setup(["button_region"])
+            elif not self.cfg.get("region"):
+                self.run_setup(ALL_KEYS)
+            return
+        if (purpose == "setup_button" and
+                self.cfg.get("button_capture_source", "monitor") == "window"):
+            self.auto_recognition_after_region = True
+            self.log("Movement-control window shared. Select the controls region for recognition…")
+            self.run_setup(["button_region"])
+            return
         if purpose in ("setup_button", "setup_stream"):
             keys = self.pending_setup_keys; self.pending_setup_keys = None
             if keys: self.run_setup(keys)

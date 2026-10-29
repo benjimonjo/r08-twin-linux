@@ -116,33 +116,37 @@ class WaylandPointer:
         self.ready_callback(bool(ok), str(message))
 
     def map_point(self, x, y):
-        """Map capture pixels proportionally into the selected portal stream.
+        """Map a calibrated desktop point into the selected pointer stream.
 
-        The portal reports the stream position in desktop coordinates for
-        validation, but pointer_position() takes coordinates local to the
-        selected stream. Only the position within the captured monitor and
-        the stream's logical size belong in the pointer event.
+        Monitor captures and the RemoteDesktop monitor stream use the same
+        desktop coordinate space, even when the stream spans the full virtual
+        workspace. Window captures are local to the selected window and need
+        the selected window origin restored.
         """
         m = self.capture_monitor
-        width, height = float(m["width"]), float(m["height"])
-        px = (float(x) - float(m["left"])) / width
-        py = (float(y) - float(m["top"])) / height
-        if not (0.0 <= px < 1.0 and 0.0 <= py < 1.0):
+        x, y = float(x), float(y)
+        capture_left, capture_top = float(m["left"]), float(m["top"])
+        capture_right = capture_left + float(m["width"])
+        capture_bottom = capture_top + float(m["height"])
+        if not (capture_left <= x < capture_right and
+                capture_top <= y < capture_bottom):
             raise RuntimeError(
                 f"A calibrated panel button is outside the selected input stream "
                 f"({self.stream_size[0]}×{self.stream_size[1]} at "
                 f"{self.stream_position[0]},{self.stream_position[1]}). "
                 "Select the monitor containing the robot panel.")
-        sw, sh = map(float, self.stream_size)
-        mapped_x, mapped_y = px * sw, py * sh
         if self.output_type == "window":
             # KDE's window RemoteDesktop backend interprets pointer coordinates
             # in desktop space even though the selected video surface is
             # window-local. Apply the selected window's desktop origin once.
+            width, height = float(m["width"]), float(m["height"])
+            px = (x - capture_left) / width
+            py = (y - capture_top) / height
+            sw, sh = map(float, self.stream_size)
+            mapped_x, mapped_y = px * sw, py * sh
             stream_left, stream_top = map(float, self.stream_position)
-            mapped_x += stream_left
-            mapped_y += stream_top
-        return mapped_x, mapped_y
+            return stream_left + mapped_x, stream_top + mapped_y
+        return x, y
 
     def click(self, x, y):
         """Queue one left click on the portal main loop; returns immediately."""
@@ -163,6 +167,8 @@ class WaylandPointer:
         self.GLib.idle_add(self._press_at, sx, sy)
 
     def _press_at(self, x, y):
+        if not self.session:
+            return False
         try:
             self.session.pointer_position(self.stream_id, x, y)
             self.session.pointer_button(272, self.Xdp.ButtonState.PRESSED)  # BTN_LEFT
