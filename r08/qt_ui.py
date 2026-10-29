@@ -602,6 +602,7 @@ def resolve_panel_button(capture, calibration, name, fallback, button_region=Non
         rel_x, rel_y = calibration["relative"][name]
         return [monitor["left"] + sx + location[0] + rel_x * tw,
                 monitor["top"] + sy + location[1] + rel_y * th]
+
     margin_x, margin_y = max(tw, int(tw * .7)), max(th, int(th * .7))
     sx, sy = max(0, ox - margin_x), max(0, oy - margin_y)
     ex, ey = min(edges.shape[1], ox + tw + margin_x), min(edges.shape[0], oy + th + margin_y)
@@ -615,6 +616,22 @@ def resolve_panel_button(capture, calibration, name, fallback, button_region=Non
     rel_x, rel_y = calibration["relative"][name]
     return [monitor["left"] + sx + location[0] + rel_x * tw,
             monitor["top"] + sy + location[1] + rel_y * th]
+
+
+def _point_is_blue_button(capture, point, radius=18):
+    """Require an automated target to still lie on a visible panel button."""
+    monitor = dict(capture.monitors[0])
+    x = float(point[0]) - float(monitor["left"])
+    y = float(point[1]) - float(monitor["top"])
+    if not (0 <= x < float(monitor["width"]) and 0 <= y < float(monitor["height"])):
+        return False
+    shot = np.asarray(capture.grab(monitor))
+    hsv = cv2.cvtColor(shot[:, :, :3], cv2.COLOR_BGR2HSV)
+    blue = cv2.inRange(hsv, np.array([88, 55, 65], np.uint8), np.array([140, 255, 255], np.uint8))
+    ix, iy = round(x), round(y)
+    y0, y1 = max(0, iy - radius), min(blue.shape[0], iy + radius + 1)
+    x0, x1 = max(0, ix - radius), min(blue.shape[1], ix + radius + 1)
+    return bool(np.any(blue[y0:y1, x0:x1]))
 
 
 class ButtonRecognitionWorker(QtCore.QThread):
@@ -1040,6 +1057,7 @@ class QtApp:
         objactions = QtWidgets.QHBoxLayout(); ol.addLayout(objactions)
         delete_obj = QtWidgets.QPushButton("Delete"); delete_obj.clicked.connect(self._delete_object); objactions.addWidget(delete_obj)
         edit_obj = QtWidgets.QPushButton("Edit size"); edit_obj.clicked.connect(self._edit_object); objactions.addWidget(edit_obj)
+        edit_points = QtWidgets.QPushButton("Edit points"); edit_points.clicked.connect(self._edit_object_points); objactions.addWidget(edit_points)
         for idx in range(3):
             b = QtWidgets.QPushButton(f"Point {idx+1} to target"); b.clicked.connect(lambda checked=False, n=idx: self._object_point_to_target(n)); ol.addWidget(b)
         self.show_objects = QtWidgets.QCheckBox("Show mapped objects"); self.show_objects.setChecked(True); self.show_objects.toggled.connect(self._mark_dirty); ol.addWidget(self.show_objects)
@@ -1588,6 +1606,70 @@ class QtApp:
         if ok:
             self.cfg.set("objects", self.objects); self.cfg.save(); self._refresh_objects(); self.object_list.setCurrentRow(i); self.dirty = True
 
+    def _edit_object_points(self):
+        i = self.object_list.currentRow()
+        if i < 0:
+            return
+        obj = self.objects[i]
+        if obj.get("type") != "plate":
+            QtWidgets.QMessageBox.information(
+                self.window, "Edit points",
+                "Only plate points can be edited here. Pipe endpoints are still edited by remapping the pipe.")
+            return
+        points = obj.get("pts", [])
+        if len(points) != 3:
+            QtWidgets.QMessageBox.warning(self.window, "Edit points", "This plate does not have exactly three points.")
+            return
+
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle(f"Edit points — {obj.get('name', 'Plate')}")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(QtWidgets.QLabel(
+            "Enter the three top-face points in FANUC WORLD coordinates (inches). "
+            "The points must be distinct and non-collinear."))
+        grid = QtWidgets.QGridLayout()
+        grid.addWidget(QtWidgets.QLabel("Point"), 0, 0)
+        for col, axis in enumerate(("X", "Y", "Z"), 1):
+            grid.addWidget(QtWidgets.QLabel(axis), 0, col)
+        fields = []
+        for row, point in enumerate(points, 1):
+            grid.addWidget(QtWidgets.QLabel(str(row)), row, 0)
+            row_fields = []
+            for col, value in enumerate(point[:3], 1):
+                field = QtWidgets.QDoubleSpinBox()
+                field.setRange(-100000.0, 100000.0)
+                field.setDecimals(3)
+                field.setSingleStep(0.1)
+                field.setValue(float(value))
+                row_fields.append(field)
+                grid.addWidget(field, row, col)
+            fields.append(row_fields)
+        layout.addLayout(grid)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+
+        updated = [[field.value() for field in row_fields] for row_fields in fields]
+        from .model3d import plate_dims
+        if plate_dims({"type": "plate", "pts": updated}) is None:
+            QtWidgets.QMessageBox.warning(
+                self.window, "Edit points",
+                "The three points must be distinct and non-collinear.")
+            return
+        obj["pts"] = updated
+        self.cfg.set("objects", self.objects)
+        self.cfg.save()
+        self._refresh_objects()
+        self.object_list.setCurrentRow(i)
+        self.dirty = True
+        self.teach_label.setText(f"Updated {obj_summary(obj)}")
+        self.log(f"Updated points for {obj_summary(obj)}")
+
     def _object_point_to_target(self, n):
         i = self.object_list.currentRow()
         if i < 0 or n >= len(self.objects[i]["pts"]):
@@ -1843,7 +1925,7 @@ class QtApp:
             self.plan_label.setText("Automated input could not start. Use manual guidance or check KDE portal support.")
             QtWidgets.QMessageBox.warning(self.window, "Automated input unavailable", message)
             self.log(f"Automated input unavailable: {message}"); return
-        self.log("KDE granted pointer access. Starting the calibrated panel sequence.")
+        self.log(f"KDE granted pointer access. {message} Starting the calibrated panel sequence.")
         self._auto_click_current()
 
     def _auto_click_current(self):
@@ -1860,6 +1942,20 @@ class QtApp:
             pos = resolve_panel_button(capture, self.cfg.get("button_panel"), action.btn, pos,
                                        None if window_source else self.cfg.get("button_region"),
                                        search_full=window_source)
+            if window_source and not _point_is_blue_button(capture, pos):
+                monitor = capture.monitors[0]
+                raise RuntimeError(
+                    f"The calibrated target for {action.btn} is not on a visible blue "
+                    f"panel button at ({pos[0]:.0f},{pos[1]:.0f}); the panel layout "
+                    f"or scale has changed. Re-run movement-panel button setup "
+                    f"with the complete control window visible "
+                    f"({monitor['width']}×{monitor['height']} at "
+                    f"{monitor['left']},{monitor['top']}).")
+            panel_monitor = capture.monitors[0]
+            self.log(
+                f"Panel target {action.btn}: ({pos[0]:.0f},{pos[1]:.0f}); "
+                f"capture {panel_monitor['left']},{panel_monitor['top']} "
+                f"{panel_monitor['width']}×{panel_monitor['height']}")
             if self.window.frameGeometry().contains(QtCore.QPoint(round(pos[0]), round(pos[1]))):
                 raise RuntimeError("Move the R08 window away from the detected movement-button panel, then resume.")
             self.plan_label.setText(f"Automated action {self.guided_index + 1}/{len(self.guided_plan)}: clicking {action.btn.replace('-', '−')} — {action.label}")

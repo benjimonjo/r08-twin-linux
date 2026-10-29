@@ -99,7 +99,11 @@ class WaylandPointer:
                         f"{self.stream_position[0]},{self.stream_position[1]} "
                         f"({self.stream_size[0]}×{self.stream_size[1]}). "
                         "Restart automated input and select the monitor containing the robot panel.")
-            self._ready(True, "")
+            self._ready(
+                True,
+                f"Pointer stream {self.output_type}: "
+                f"{self.stream_size[0]}×{self.stream_size[1]} at "
+                f"{self.stream_position[0]},{self.stream_position[1]}.")
         except Exception as exc:
             try:
                 if self.session: self.session.close()
@@ -132,11 +136,12 @@ class WaylandPointer:
         sw, sh = map(float, self.stream_size)
         mapped_x, mapped_y = px * sw, py * sh
         if self.output_type == "window":
-            # KDE's window RemoteDesktop stream reports a window-sized logical
-            # surface, but pointer_position() consumes desktop coordinates for
-            # that stream. Restore the selected window's desktop origin.
+            # KDE's window RemoteDesktop backend interprets pointer coordinates
+            # in desktop space even though the selected video surface is
+            # window-local. Apply the selected window's desktop origin once.
             stream_left, stream_top = map(float, self.stream_position)
-            return stream_left + mapped_x, stream_top + mapped_y
+            mapped_x += stream_left
+            mapped_y += stream_top
         return mapped_x, mapped_y
 
     def click(self, x, y):
@@ -144,6 +149,17 @@ class WaylandPointer:
         if not self.session or not self.loop or not self.GLib:
             raise RuntimeError("Wayland pointer permission is not active.")
         sx, sy = self.map_point(x, y)
+        print(
+            "R08 pointer map: "
+            f"input=({float(x):.1f},{float(y):.1f}) "
+            f"capture=({self.capture_monitor.get('left', 0)},"
+            f"{self.capture_monitor.get('top', 0)},"
+            f"{self.capture_monitor.get('width')},"
+            f"{self.capture_monitor.get('height')}) "
+            f"stream=({self.stream_position[0]},{self.stream_position[1]},"
+            f"{self.stream_size[0]},{self.stream_size[1]}) "
+            f"output=({sx:.1f},{sy:.1f})",
+            flush=True)
         self.GLib.idle_add(self._press_at, sx, sy)
 
     def _press_at(self, x, y):

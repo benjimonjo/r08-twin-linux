@@ -459,6 +459,7 @@ class App:
         r.pack(fill="x", pady=(6, 0))
         mk_button(r, "Delete", self.delete_obj, padx=10).pack(side="left")
         mk_button(r, "Edit size", self.edit_obj, padx=10).pack(side="left", padx=6)
+        mk_button(r, "Edit points", self.edit_obj_points, padx=10).pack(side="left", padx=6)
         tk.Label(r, text="point to Go:", bg=C.card, fg=C.muted, font=FONT_SM).pack(side="left", padx=(8, 2))
         for k in range(3):
             mk_button(r, str(k + 1), lambda k=k: self.point_to_go(k), padx=6, pady=2, font=FONT_SM).pack(side="left", padx=1)
@@ -1144,6 +1145,38 @@ class App:
                 if inner is not None:
                     o["d"], o["id"] = float(v), float(inner)
         self._save_objs()
+
+    def edit_obj_points(self):
+        if not (0 <= self.sel_i < len(self.objects)):
+            return
+        obj = self.objects[self.sel_i]
+        if obj.get("type") != "plate":
+            messagebox.showinfo("Edit points", "Only plate points can be edited here.")
+            return
+        points = obj.get("pts", [])
+        if len(points) != 3:
+            messagebox.showerror("Edit points", "This plate does not have exactly three points.")
+            return
+        updated = []
+        for index, point in enumerate(points, 1):
+            values = []
+            for axis, value in zip(("X", "Y", "Z"), point):
+                edited = simpledialog.askfloat(
+                    "Edit plate point",
+                    f"Point {index} {axis} (in):",
+                    parent=self.root, initialvalue=float(value),
+                )
+                if edited is None:
+                    return
+                values.append(float(edited))
+            updated.append(values)
+        from .model3d import plate_dims
+        if plate_dims({"type": "plate", "pts": updated}) is None:
+            messagebox.showerror("Edit points", "The three points must be distinct and non-collinear.")
+            return
+        obj["pts"] = updated
+        self._save_objs()
+        self._teach_msg()
 
     def point_to_go(self, k):
         if not (0 <= self.sel_i < len(self.objects)) or k >= len(self.objects[self.sel_i]["pts"]):
