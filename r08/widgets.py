@@ -21,6 +21,8 @@ SETTING_DEFS = [   # key, label, low, high, step
     ("pos_tol", "Position tolerance (in)", 0.05, 1.0, 0.05),
     ("ang_tol", "Angle tolerance (\u00b0)", 0.5, 5.0, 0.5),
     ("viz_deg_s", "Drawn arm speed limit (\u00b0/s)", 5, 120, 5),
+    ("pose_smoothing", "Pose smoothing strength", 0.05, 1.0, 0.05),
+    ("camera_pose_blend", "Camera pose contribution", 0.0, 1.0, 0.05),
 ]
 KEYMAP = {"q": "X+", "a": "X-", "w": "Y+", "s": "Y-", "e": "Z+", "d": "Z-",
           "u": "Xa+", "j": "Xa-", "i": "Ya+", "k": "Ya-", "o": "Za+", "l": "Za-"}
