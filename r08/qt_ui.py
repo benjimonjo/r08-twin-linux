@@ -233,6 +233,21 @@ class ButtonReviewDialog(QtWidgets.QDialog):
         self.buttons = out; self.accept()
 
 
+class DebugDialog(QtWidgets.QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("R08 Debug")
+        self.resize(900, 600)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.output = QtWidgets.QTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+        layout.addWidget(self.output)
+        clear = QtWidgets.QPushButton("Clear")
+        clear.clicked.connect(self.output.clear)
+        layout.addWidget(clear)
+
+
 def detect_panel_buttons(capture, button_region=None):
     monitor = dict(button_region or capture.monitors[0])
     image = np.asarray(capture.grab(monitor))
@@ -719,17 +734,10 @@ class CaptureInitWorker(QtCore.QThread):
         self.separate, self.source, self.restore_token = separate, source, restore_token
     def run(self):
         try:
-            try:
-                capture = new_mss(
-                    separate=self.separate,
-                    source=self.source or ("monitor" if self.separate else None),
-                    restore_token=self.restore_token)
-            except Exception:
-                if not self.restore_token:
-                    raise
-                capture = new_mss(
-                    separate=self.separate,
-                    source=self.source or ("monitor" if self.separate else None))
+            capture = new_mss(
+                separate=self.separate,
+                source=self.source or ("monitor" if self.separate else None),
+                restore_token=self.restore_token)
             self.finished_result.emit(True, capture)
         except Exception as exc:
             self.finished_result.emit(False, str(exc))
@@ -946,6 +954,7 @@ class QtApp:
         self.step_reader = StepReader(self.shared, self.button_capture); self.step_reader.start()
         self.capture_init_worker = None
         self.capture_init_purpose = None
+        self.capture_init_restore_token = None
         self.portal_selection_hint = None
         self.auto_recognition_after_region = False
         self.startup_capture_started = False
@@ -965,10 +974,18 @@ class QtApp:
         self.update_worker = None
         self.workspace_worker = None
         self.image_label = None; self.last_tick = clock(); self.log_entries = []
+        self.debug_dialog = None
+        self._last_debug_raw = None
+        self._last_debug_step = None
+        self._last_debug_step_level = None
         self.fps = 0.0; self._fps_count = 0; self._fps_time = clock()
         self.gpu_monitor = GpuUsageMonitor(); self.gpu_monitor.start()
         self.gpu_usage = None
         self._build()
+        self.debug_dialog = DebugDialog(self.window)
+        for entry in self.log_entries:
+            self.debug_dialog.output.append(entry)
+        self.log_entries.clear()
         self._refresh()
         self.window.closeEvent = self._close_event
         self.window.show()
@@ -1039,6 +1056,7 @@ class QtApp:
         setup = QtWidgets.QPushButton("Setup ▾"); setup.clicked.connect(self._setup_menu); header.addWidget(setup)
         helpb = QtWidgets.QPushButton("Help"); helpb.clicked.connect(self._help); header.addWidget(helpb)
         settingsb = QtWidgets.QPushButton("Settings"); settingsb.clicked.connect(self._settings); header.addWidget(settingsb)
+        debugb = QtWidgets.QPushButton("Debug"); debugb.clicked.connect(self._toggle_debug); header.addWidget(debugb)
         self.update_button = QtWidgets.QPushButton("Check GitHub updates"); self.update_button.clicked.connect(self._update_button_clicked); header.addWidget(self.update_button)
         reloadb = QtWidgets.QPushButton("Reload scripts (dev)")
         reloadb.setToolTip("Save settings and restart R08 to load the current Python files")
@@ -1067,7 +1085,6 @@ class QtApp:
         self.camera_source = QtWidgets.QComboBox(); self.camera_source.addItems(["Stream camera 1", "Stream camera 2"])
         self.camera_source.setToolTip("Select the label for the camera currently selected in the Discord stream")
         self.camera_source.currentIndexChanged.connect(self._mark_dirty); views.addWidget(self.camera_source)
-        self.log_view = QtWidgets.QTextEdit(); self.log_view.setReadOnly(True); self.log_view.setMaximumHeight(110); ll.addWidget(self.log_view)
         split.addWidget(left)
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setMinimumWidth(370); scroll.setMaximumWidth(470)
         side = QtWidgets.QWidget(); sl = QtWidgets.QVBoxLayout(side); sl.setContentsMargins(4, 2, 4, 2)
@@ -1189,22 +1206,34 @@ class QtApp:
 
     def _mark_dirty(self, *_): self.dirty = True
 
-    def _capture_restore_token(self, separate, source=None):
-        tokens = self.cfg.get("pipewire_restore_tokens", {}) or {}
-        role = ("panel_" + (source or self.cfg.get("button_capture_source", "monitor"))
+    def _capture_token_role(self, separate, source=None, purpose=None):
+        if purpose == "automated_pointer":
+            return "pointer_" + (source or "monitor")
+        return ("panel_" + (source or self.cfg.get("button_capture_source", "monitor"))
                 if separate else "primary")
+
+    def _capture_restore_token(self, separate, source=None, purpose=None):
+        tokens = self.cfg.get("pipewire_restore_tokens", {}) or {}
+        role = self._capture_token_role(separate, source, purpose)
         return tokens.get(role)
 
-    def _save_capture_restore_token(self, capture, separate, source=None):
+    def _save_capture_restore_token(self, capture, separate, source=None, purpose=None):
         token = getattr(capture, "new_restore_token", None)
         if not token:
             return
         tokens = self.cfg.get("pipewire_restore_tokens", {}) or {}
-        role = ("panel_" + (source or self.cfg.get("button_capture_source", "monitor"))
-                if separate else "primary")
+        role = self._capture_token_role(separate, source, purpose)
         tokens[role] = str(token)
         self.cfg.set("pipewire_restore_tokens", tokens)
         self.cfg.save()
+
+    def _toggle_debug(self):
+        if self.debug_dialog is None:
+            return
+        self.debug_dialog.setVisible(not self.debug_dialog.isVisible())
+        if self.debug_dialog.isVisible():
+            self.debug_dialog.raise_()
+            self.debug_dialog.activateWindow()
 
     def _camera_texture_toggled(self, enabled):
         self.cfg.set("camera_texture_enabled", bool(enabled))
@@ -1998,7 +2027,7 @@ class QtApp:
                 # Discord recreates its panels, so pointer input must always
                 # let the user select the intended control window.
                 restore_token=None if window_source else self._capture_restore_token(
-                    True, "monitor"),
+                    True, "monitor", "automated_pointer"),
                 parent=self.window)
             self.capture_init_worker.finished_result.connect(self._capture_init_finished)
             self.capture_init_worker.start()
@@ -2276,6 +2305,7 @@ class QtApp:
             return
         try:
             if getattr(self, "button_recognition_worker", None) and self.button_recognition_worker.isRunning(): return
+            self.log("Starting automatic movement-panel button recognition.")
             self.button_state.setText("Recognizing panel buttons…")
             self.button_recognition_worker = ButtonRecognitionWorker(
                 self.button_capture, self.cfg.get("button_region"),
@@ -2289,17 +2319,23 @@ class QtApp:
     def _button_recognition_finished(self, ok, result):
         self.button_state.setText("Panel buttons not set up" if not ok else "Panel buttons recognized")
         if not ok:
+            self.log(f"Automatic button recognition failed: {result}")
             QtWidgets.QMessageBox.warning(self.window, "Button recognition failed", str(result)); return
         self.button_capture, (monitor, image, detected) = result
+        self._save_capture_restore_token(
+            self.button_capture, True, self.cfg.get("button_capture_source", "monitor"))
+        self.log(f"Automatic button recognition found {len(detected)} label(s).")
+        for name, point in sorted(detected.items()):
+            self.log(f"  {name}: ({point[0]:.1f}, {point[1]:.1f})")
         step_region = detect_step_label_region(image, monitor)
         if step_region is not None:
             self.cfg.set("step", step_region)
             self.cfg.save()
             self.shared.set_regions(step=step_region, keep=True)
             self.step_reader.set_capture(self.button_capture)
-            self.log("Recognized the arm step-size text region automatically.")
+            self.log(f"Automatic step-size recognition selected {step_region}.")
         else:
-            self.log("Arm step-size text was not recognized; use Step-size text region setup.")
+            self.log("Automatic step-size recognition found no matching text.")
         if not detected:
             QtWidgets.QMessageBox.information(self.window, "Button recognition", "No panel button labels were detected. Move the R08 window away, ensure the panel is visible, or use manual panel setup.")
             return
@@ -2499,8 +2535,41 @@ class QtApp:
         if self.setup_queue:
             self.run_setup(self.setup_queue.pop(0))
 
+    def _retry_capture_without_token(self, purpose, setup_keys):
+        source = self.cfg.get("button_capture_source", "monitor") if purpose in (
+            "setup_button", "startup_button", "automated_input") else self.capture_source
+        separate = purpose in ("setup_button", "startup_button", "automated_input", "automated_pointer")
+        role = self._capture_token_role(separate, "monitor" if purpose == "automated_pointer" else source, purpose)
+        tokens = self.cfg.get("pipewire_restore_tokens", {}) or {}
+        if not tokens.get(role):
+            return False
+        answer = QtWidgets.QMessageBox.question(
+            self.window, "Screen-share permission expired",
+            "The saved permission for this capture is no longer valid. Pick the screen or window again?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.Yes)
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                return False
+        tokens.pop(role, None)
+        self.cfg.set("pipewire_restore_tokens", tokens)
+        self.cfg.save()
+        self.log(f"Saved screen-share token '{role}' was invalid; requesting a new selection.")
+        if purpose == "startup_stream":
+            self.startup_capture_started = False
+            self._start_startup_captures()
+        elif purpose == "startup_button":
+            self._start_startup_button_capture()
+        elif purpose in ("setup_button", "setup_stream"):
+            self.run_setup(setup_keys or (["button_region"] if purpose == "setup_button" else ALL_KEYS))
+        elif purpose in ("automated_input", "automated_pointer"):
+            self._start_automated_move()
+        elif purpose == "camera_capture":
+            self.camera_capture_error_time = 0.0
+        return True
+
     def _capture_init_finished(self, ok, result):
         purpose = self.capture_init_purpose
+        setup_keys = self.pending_setup_keys
         self.capture_init_worker = None; self.capture_init_purpose = None
         if not ok:
             self.pending_setup_keys = None; self.setup_queue.clear()
@@ -2512,7 +2581,8 @@ class QtApp:
                 self.camera_capture_error_time = clock()
                 self.log(f"Discord camera capture failed: {result}")
             else:
-                QtWidgets.QMessageBox.warning(self.window, "Screen share unavailable", str(result))
+                if not self._retry_capture_without_token(purpose, setup_keys):
+                    QtWidgets.QMessageBox.warning(self.window, "Screen share unavailable", str(result))
             return
         if self.portal_selection_hint is not None:
             self.portal_selection_hint.close()
@@ -2525,6 +2595,7 @@ class QtApp:
             self.step_reader.set_capture(result)
         elif purpose == "automated_pointer":
             self.pointer_capture = result
+            self._save_capture_restore_token(result, True, "monitor", purpose)
         else:
             self.capture = result
             self._save_capture_restore_token(result, False)
@@ -2597,7 +2668,11 @@ class QtApp:
 
     def log(self, text):
         stamp = time.strftime("%H:%M:%S")
-        self.log_view.append(f"<span style='color:{C.faint}'>{stamp}</span>  {text}")
+        line = f"<span style='color:{C.faint}'>{stamp}</span>  {text}"
+        if self.debug_dialog is not None:
+            self.debug_dialog.output.append(line)
+        else:
+            self.log_entries.append(text)
 
     def _refresh(self):
         self.button_state.setText("Panel buttons ready" if all(n in (self.cfg.get("buttons", {}) or {}) for n in NEEDED_BUTTONS) else "Panel buttons not set up")
@@ -2613,6 +2688,17 @@ class QtApp:
         snap = self.shared.snapshot()
         self.read_state.setText(f"● Reading {snap.scan_rate:.0f}/s" if snap.state == "Live" else f"○ {snap.state}")
         self.raw_label.setText(snap.raw or "Waiting for the number table…")
+        if snap.raw and snap.raw != self._last_debug_raw:
+            self._last_debug_raw = snap.raw
+            self.log(f"OCR pose readout: {snap.raw}")
+        if snap.step_status != self._last_debug_step:
+            self._last_debug_step = snap.step_status
+            self.log(f"Step-size OCR: {snap.step_status}")
+        if snap.step_level != self._last_debug_step_level:
+            self._last_debug_step_level = snap.step_level
+            if snap.step_level is not None:
+                pos, ang = STEP_LEVELS[snap.step_level]
+                self.log(f"Step-size OCR recognized: {pos:g} in / {ang:g}°")
         if not snap.has_step:
             self.step_read_label.setText("Continuous step OCR is waiting for its region; run full setup or set the step-size text region.")
         elif snap.step_level is None:
