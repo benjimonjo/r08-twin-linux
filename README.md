@@ -79,17 +79,20 @@ The native UI also has a **Configuration** tab containing the capture, number
 table, panel-button, camera-video, step-size, and status setup actions. Its
 **Find arm reach limits** action samples the configured joint limits and stores
 an estimated TCP workspace bounding box in the configuration.
-The Live twin view includes **Map camera onto robot**. Configure the Discord
-camera region, choose **Configuration -> Calibrate camera using robot points**,
-then click the landmarks in this order: base, J1 through J6, flange, and tool
-tip. After calibration, the live camera texture is projected onto the
-reconstructed robot and can be toggled from the Live twin toolbar.
-The main window includes a toggleable **Debug** window. It shows application
-logs, OCR pose readouts, continuous step-size OCR status and values, automatic
-button recognition results and coordinates, automatic step-region detection,
-capture errors, and other recognition diagnostics. Enable **Show live camera
-preview** from the Configuration tab to inspect the captured frame, resolution,
-calibration landmarks, and latest camera update time.
+The Live twin view includes **Map camera onto robot** and **Overlay camera
+feed**. Configure the Discord camera region, select Camera 1 or Camera 2,
+switch that PTZ camera to its home position, then choose
+**Configuration -> Calibrate active camera using robot points** and click the
+landmarks in this order: base, J1 through J6, flange, and tool tip. Each camera
+has its own saved calibration. The camera texture can be projected onto the
+reconstructed robot, or the live camera image can be blended over the 3D view
+with the adjustable overlay control in the Live twin toolbar.
+The main window includes a toggleable **Debug** window. It is a scrollable
+diagnostics panel containing application logs, OCR snapshots and cell previews,
+OCR pose readouts, continuous step-size OCR status and values, automatic button
+recognition results and coordinates, automatic step-region detection, capture
+errors, and other recognition diagnostics. The live camera preview and
+calibration status are also available in this Debug window.
 The robot position table and Discord camera region use the same primary
 PipeWire capture session, so they can be selected from one shared screen
 stream. Use **Configuration -> Clear saved PipeWire tokens** when you want the

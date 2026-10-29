@@ -247,6 +247,9 @@ class DebugDialog(QtWidgets.QDialog):
         clear.clicked.connect(self.output.clear)
         layout.addWidget(clear)
 
+    def add_panel(self, widget):
+        self.layout().addWidget(widget)
+
 
 def detect_panel_buttons(capture, button_region=None):
     monitor = dict(button_region or capture.monitors[0])
@@ -983,6 +986,7 @@ class QtApp:
         self.gpu_usage = None
         self._build()
         self.debug_dialog = DebugDialog(self.window)
+        self._build_debug_panels()
         for entry in self.log_entries:
             self.debug_dialog.output.append(entry)
         self.log_entries.clear()
@@ -1053,7 +1057,7 @@ class QtApp:
         brand = QtWidgets.QLabel("R08  live twin  ·  FANUC R-2000iA/200F"); brand.setStyleSheet(f"color:{C.yellow};font-size:16px;font-weight:700")
         header.addWidget(brand); header.addStretch()
         self.read_state = QtWidgets.QLabel("Waiting for setup"); header.addWidget(self.read_state)
-        setup = QtWidgets.QPushButton("Setup ▾"); setup.clicked.connect(self._setup_menu); header.addWidget(setup)
+        setup = QtWidgets.QPushButton("Configuration"); setup.clicked.connect(self._show_configuration); header.addWidget(setup)
         helpb = QtWidgets.QPushButton("Help"); helpb.clicked.connect(self._help); header.addWidget(helpb)
         settingsb = QtWidgets.QPushButton("Settings"); settingsb.clicked.connect(self._settings); header.addWidget(settingsb)
         debugb = QtWidgets.QPushButton("Debug"); debugb.clicked.connect(self._toggle_debug); header.addWidget(debugb)
@@ -1061,7 +1065,7 @@ class QtApp:
         reloadb = QtWidgets.QPushButton("Reload scripts (dev)")
         reloadb.setToolTip("Save settings and restart R08 to load the current Python files")
         reloadb.clicked.connect(lambda: self._reload_application()); header.addWidget(reloadb)
-        tabs = QtWidgets.QTabWidget(); root.addWidget(tabs, 1)
+        tabs = QtWidgets.QTabWidget(); self.tabs = tabs; root.addWidget(tabs, 1)
         split = QtWidgets.QSplitter(); tabs.addTab(split, "Live twin")
         left = QtWidgets.QWidget(); ll = QtWidgets.QVBoxLayout(left); ll.setContentsMargins(0, 0, 4, 0)
         self.image_label = SceneLabel("Open Setup to select the number table")
@@ -1082,9 +1086,20 @@ class QtApp:
         self.camera_texture.setToolTip("Show the live camera texture projected onto the reconstructed robot after calibration.")
         self.camera_texture.setChecked(bool(self.cfg.get("camera_texture_enabled", False)))
         self.camera_texture.toggled.connect(self._camera_texture_toggled); views.addWidget(self.camera_texture)
+        self.camera_overlay = QtWidgets.QCheckBox("Overlay camera feed")
+        self.camera_overlay.setToolTip("Blend the active camera image over the 3D view.")
+        self.camera_overlay.setChecked(bool(self.cfg.get("camera_overlay_enabled", False)))
+        self.camera_overlay.toggled.connect(self._camera_overlay_toggled); views.addWidget(self.camera_overlay)
+        self.camera_overlay_alpha = QtWidgets.QDoubleSpinBox()
+        self.camera_overlay_alpha.setRange(0.05, 0.95)
+        self.camera_overlay_alpha.setSingleStep(0.05)
+        self.camera_overlay_alpha.setValue(float(self.cfg.get("camera_overlay_alpha", 0.35)))
+        self.camera_overlay_alpha.setSuffix(" overlay")
+        self.camera_overlay_alpha.valueChanged.connect(self._camera_overlay_alpha_changed)
+        views.addWidget(self.camera_overlay_alpha)
         self.camera_source = QtWidgets.QComboBox(); self.camera_source.addItems(["Stream camera 1", "Stream camera 2"])
         self.camera_source.setToolTip("Select the label for the camera currently selected in the Discord stream")
-        self.camera_source.currentIndexChanged.connect(self._mark_dirty); views.addWidget(self.camera_source)
+        self.camera_source.currentIndexChanged.connect(self._camera_source_changed); views.addWidget(self.camera_source)
         split.addWidget(left)
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setMinimumWidth(370); scroll.setMaximumWidth(470)
         side = QtWidgets.QWidget(); sl = QtWidgets.QVBoxLayout(side); sl.setContentsMargins(4, 2, 4, 2)
@@ -1192,6 +1207,7 @@ class QtApp:
         delete_obj = QtWidgets.QPushButton("Delete"); delete_obj.clicked.connect(self._delete_object); objactions.addWidget(delete_obj)
         edit_obj = QtWidgets.QPushButton("Edit size"); edit_obj.clicked.connect(self._edit_object); objactions.addWidget(edit_obj)
         edit_points = QtWidgets.QPushButton("Edit points"); edit_points.clicked.connect(self._edit_object_points); objactions.addWidget(edit_points)
+        edit_axes = QtWidgets.QPushButton("Edit points in 3D"); edit_axes.clicked.connect(self._edit_object_points_3d); objactions.addWidget(edit_axes)
         for idx in range(3):
             b = QtWidgets.QPushButton(f"Point {idx+1} to target"); b.clicked.connect(lambda checked=False, n=idx: self._object_point_to_target(n)); ol.addWidget(b)
         self.show_objects = QtWidgets.QCheckBox("Show mapped objects"); self.show_objects.setChecked(True); self.show_objects.toggled.connect(self._mark_dirty); ol.addWidget(self.show_objects)
@@ -1235,10 +1251,96 @@ class QtApp:
             self.debug_dialog.raise_()
             self.debug_dialog.activateWindow()
 
+    def _show_configuration(self):
+        self.tabs.setCurrentIndex(1)
+
+    def _build_debug_panels(self):
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        ocr = self._group("OCR snapshots")
+        ocr_layout = QtWidgets.QVBoxLayout(ocr)
+        ocr_layout.addWidget(QtWidgets.QLabel(
+            "Capture the current number table to inspect the region and each cell used by the OCR reader."))
+        snapshot = QtWidgets.QPushButton("Capture OCR snapshot")
+        snapshot.clicked.connect(self._save_ocr_snapshot)
+        ocr_layout.addWidget(snapshot)
+        self.ocr_snapshot_status = QtWidgets.QLabel("No snapshot captured.")
+        self.ocr_snapshot_status.setProperty("muted", True)
+        self.ocr_snapshot_status.setWordWrap(True)
+        ocr_layout.addWidget(self.ocr_snapshot_status)
+        self.ocr_region_preview = QtWidgets.QLabel("Region preview")
+        self.ocr_region_preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.ocr_region_preview.setMinimumHeight(70)
+        self.ocr_region_preview.setMaximumHeight(120)
+        self.ocr_region_preview.setStyleSheet("background:#0f1115;border:1px solid #303641")
+        ocr_layout.addWidget(self.ocr_region_preview)
+        self.ocr_cell_previews = []
+        cell_grid = QtWidgets.QGridLayout()
+        for i, axis in enumerate(AXES):
+            cell = QtWidgets.QLabel(f"{axis}\nNo image")
+            cell.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            cell.setMinimumSize(125, 54)
+            cell.setMaximumHeight(78)
+            cell.setStyleSheet("background:#0f1115;border:1px solid #303641")
+            self.ocr_cell_previews.append(cell)
+            cell_grid.addWidget(cell, i // 3, i % 3)
+        ocr_layout.addLayout(cell_grid)
+        layout.addWidget(ocr)
+
+        debug = self._group("Camera debug view")
+        debug_layout = QtWidgets.QVBoxLayout(debug)
+        self.debug_camera_preview = QtWidgets.QCheckBox("Show live camera preview")
+        self.debug_camera_preview.setToolTip("Capture the configured Discord camera region and show it here for calibration diagnostics.")
+        self.debug_camera_preview.toggled.connect(self._mark_dirty)
+        debug_layout.addWidget(self.debug_camera_preview)
+        self.debug_camera_status = QtWidgets.QLabel("Camera preview is disabled.")
+        self.debug_camera_status.setWordWrap(True)
+        debug_layout.addWidget(self.debug_camera_status)
+        self.debug_camera_image = QtWidgets.QLabel("No camera frame")
+        self.debug_camera_image.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.debug_camera_image.setMinimumHeight(120)
+        self.debug_camera_image.setMaximumHeight(360)
+        self.debug_camera_image.setStyleSheet("background:#0f1115;border:1px solid #303641")
+        debug_layout.addWidget(self.debug_camera_image)
+        self.debug_calibration_status = QtWidgets.QLabel()
+        self.debug_calibration_status.setWordWrap(True)
+        debug_layout.addWidget(self.debug_calibration_status)
+        layout.addWidget(debug)
+        layout.addStretch()
+        scroll.setWidget(page)
+        self.debug_dialog.add_panel(scroll)
+        self._update_ocr_snapshot_preview()
+        self._refresh_debug_calibration_status()
+
     def _camera_texture_toggled(self, enabled):
         self.cfg.set("camera_texture_enabled", bool(enabled))
         self.cfg.save()
         self.dirty = True
+
+    def _camera_overlay_toggled(self, enabled):
+        self.cfg.set("camera_overlay_enabled", bool(enabled))
+        self.cfg.save()
+        self.dirty = True
+
+    def _camera_overlay_alpha_changed(self, value):
+        self.cfg.set("camera_overlay_alpha", float(value))
+        self.cfg.save()
+        self.dirty = True
+
+    def _camera_source_changed(self, *_):
+        self._refresh_debug_calibration_status()
+        self.dirty = True
+
+    def _active_camera_calibration(self):
+        calibrations = self.cfg.get("camera_texture_calibrations", {}) or {}
+        active = calibrations.get(str(self.camera_source.currentIndex() + 1))
+        return active or (self.cfg.get("camera_texture")
+                          if self.camera_source.currentIndex() == 0 else None)
 
     def _clear_pipewire_tokens(self):
         answer = QtWidgets.QMessageBox.question(
@@ -1265,13 +1367,13 @@ class QtApp:
         self.debug_camera_status.setText("Saved PipeWire tokens cleared; the next capture will ask again.")
 
     def _refresh_debug_calibration_status(self):
-        calibration = self.cfg.get("camera_texture")
+        calibration = self._active_camera_calibration()
         if not calibration:
             self.debug_calibration_status.setText("Camera projection: not calibrated.")
             return
         names = calibration.get("landmarks", [])
         self.debug_calibration_status.setText(
-            f"Camera projection: calibrated with {len(names)} landmarks "
+            f"Camera {self.camera_source.currentIndex() + 1} projection: calibrated with {len(names)} landmarks "
             f"({', '.join(names) if names else 'no landmark names saved'}).")
 
     def _camera_landmarks(self, q):
@@ -1291,7 +1393,7 @@ class QtApp:
         if frame is None or not frame.size:
             return
         image = frame.copy()
-        calibration = self.cfg.get("camera_texture") or {}
+        calibration = self._active_camera_calibration() or {}
         if calibration.get("camera_matrix") and calibration.get("rvec") and calibration.get("tvec"):
             points = np.asarray(self._camera_landmarks(self.q_vis), np.float32)
             count = len(calibration.get("landmarks", []))
@@ -1348,7 +1450,7 @@ class QtApp:
                 object_points, image_points, camera_matrix, np.zeros(5), flags=cv2.SOLVEPNP_ITERATIVE)
             if not ok:
                 raise RuntimeError("OpenCV could not solve the camera pose from these points.")
-            self.cfg.set("camera_texture", {
+            calibration = {
                 "camera_matrix": camera_matrix.tolist(),
                 "rvec": rvec.reshape(-1).tolist(),
                 "tvec": tvec.reshape(-1).tolist(),
@@ -1356,12 +1458,18 @@ class QtApp:
                 "landmarks": [name for name, _ in landmarks[:len(dialog.image_points)]],
                 "image_points": np.asarray(dialog.image_points, float).tolist(),
                 "calibration_q": self.q_vis.tolist(),
-            })
+                "camera_index": self.camera_source.currentIndex() + 1,
+            }
+            calibrations = self.cfg.get("camera_texture_calibrations", {}) or {}
+            calibrations[str(self.camera_source.currentIndex() + 1)] = calibration
+            self.cfg.set("camera_texture_calibrations", calibrations)
+            if self.camera_source.currentIndex() == 0:
+                self.cfg.set("camera_texture", calibration)
             self.cfg.set("camera_texture_enabled", True)
             self.cfg.save()
             self.camera_texture.setChecked(True)
             self._refresh_debug_calibration_status()
-            self.log("Camera texture calibrated from robot landmarks.")
+            self.log(f"Camera {self.camera_source.currentIndex() + 1} calibrated from robot landmarks.")
             self.dirty = True
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self.window, "Camera calibration", str(exc))
@@ -1381,7 +1489,7 @@ class QtApp:
         capture_layout = QtWidgets.QGridLayout(capture)
         capture_layout.addWidget(QtWidgets.QLabel("Primary pose/step capture"), 0, 0)
         primary = QtWidgets.QPushButton("Choose monitor or window")
-        primary.clicked.connect(lambda: self._setup_menu())
+        primary.clicked.connect(self._capture_source_menu)
         capture_layout.addWidget(primary, 0, 1)
         pose = QtWidgets.QPushButton("Select number table")
         pose.clicked.connect(lambda: self.run_setup(["region"]))
@@ -1398,9 +1506,12 @@ class QtApp:
         clear_tokens.setToolTip("Forget saved screen-share permissions so the desktop chooser appears next time.")
         clear_tokens.clicked.connect(self._clear_pipewire_tokens)
         capture_layout.addWidget(clear_tokens, 4, 0, 1, 2)
-        calibrate = QtWidgets.QPushButton("Calibrate camera using robot points")
+        calibrate = QtWidgets.QPushButton("Calibrate active camera using robot points")
         calibrate.clicked.connect(self._calibrate_camera_texture)
         capture_layout.addWidget(calibrate, 5, 0, 1, 2)
+        capture_layout.addWidget(QtWidgets.QLabel(
+            "Select Camera 1 or Camera 2 in the Live twin toolbar, switch that PTZ camera to its home position, then calibrate it here."),
+            6, 0, 1, 2)
         layout.addWidget(capture)
 
         panel = self._group("Movement panel")
@@ -1432,65 +1543,18 @@ class QtApp:
         workspace_layout.addWidget(scan)
         layout.addWidget(workspace)
 
-        ocr = self._group("OCR snapshots")
-        ocr_layout = QtWidgets.QVBoxLayout(ocr)
-        ocr_layout.addWidget(QtWidgets.QLabel(
-            "Capture the current number table to inspect the region and each cell used by the OCR reader."))
-        snapshot_row = QtWidgets.QHBoxLayout()
-        snapshot = QtWidgets.QPushButton("Capture OCR snapshot")
-        snapshot.clicked.connect(self._save_ocr_snapshot)
-        snapshot_row.addWidget(snapshot)
-        self.ocr_snapshot_status = QtWidgets.QLabel("No snapshot captured.")
-        self.ocr_snapshot_status.setProperty("muted", True)
-        ocr_layout.addLayout(snapshot_row)
-        self.ocr_snapshot_status.setWordWrap(True)
-        ocr_layout.addWidget(self.ocr_snapshot_status)
-        self.ocr_region_preview = QtWidgets.QLabel("Region preview")
-        self.ocr_region_preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.ocr_region_preview.setMinimumHeight(70)
-        self.ocr_region_preview.setMaximumHeight(120)
-        self.ocr_region_preview.setStyleSheet("background:#0f1115;border:1px solid #303641")
-        ocr_layout.addWidget(self.ocr_region_preview)
-        self.ocr_cell_previews = []
-        cell_grid = QtWidgets.QGridLayout()
-        for i, axis in enumerate(AXES):
-            cell = QtWidgets.QLabel(f"{axis}\nNo image")
-            cell.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            cell.setMinimumSize(125, 54)
-            cell.setMaximumHeight(78)
-            cell.setStyleSheet("background:#0f1115;border:1px solid #303641")
-            self.ocr_cell_previews.append(cell)
-            cell_grid.addWidget(cell, i // 3, i % 3)
-        ocr_layout.addLayout(cell_grid)
-        layout.addWidget(ocr)
-        self._update_ocr_snapshot_preview()
-
-        debug = self._group("Debug view")
-        debug_layout = QtWidgets.QVBoxLayout(debug)
-        self.debug_camera_preview = QtWidgets.QCheckBox("Show live camera preview")
-        self.debug_camera_preview.setToolTip("Capture the configured Discord camera region and show it here for calibration diagnostics.")
-        self.debug_camera_preview.toggled.connect(self._mark_dirty)
-        debug_layout.addWidget(self.debug_camera_preview)
-        self.debug_camera_status = QtWidgets.QLabel("Camera preview is disabled.")
-        self.debug_camera_status.setWordWrap(True)
-        debug_layout.addWidget(self.debug_camera_status)
-        self.debug_camera_image = QtWidgets.QLabel("No camera frame")
-        self.debug_camera_image.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.debug_camera_image.setMinimumHeight(120)
-        self.debug_camera_image.setMaximumHeight(360)
-        self.debug_camera_image.setStyleSheet("background:#0f1115;border:1px solid #303641")
-        debug_layout.addWidget(self.debug_camera_image)
-        self.debug_calibration_status = QtWidgets.QLabel()
-        self.debug_calibration_status.setWordWrap(True)
-        debug_layout.addWidget(self.debug_calibration_status)
-        layout.addWidget(debug)
-        self._refresh_debug_calibration_status()
         layout.addStretch()
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         scroll.setWidget(page)
         tabs.addTab(scroll, "Configuration")
+
+    def _capture_source_menu(self):
+        menu = QtWidgets.QMenu(self.window)
+        menu.addAction("Capture a monitor", lambda: self._set_capture_source_mode("monitor"))
+        menu.addAction("Capture a window", lambda: self._set_capture_source_mode("window"))
+        menu.exec(QtGui.QCursor.pos())
 
     def _scan_workspace(self):
         if self.workspace_worker and self.workspace_worker.isRunning():
@@ -1815,6 +1879,117 @@ class QtApp:
         self.dirty = True
         self.teach_label.setText(f"Updated {obj_summary(obj)}")
         self.log(f"Updated points for {obj_summary(obj)}")
+
+    def _edit_object_points_3d(self):
+        i = self.object_list.currentRow()
+        if i < 0:
+            return
+        obj = self.objects[i]
+        if obj.get("type") != "plate" or len(obj.get("pts", [])) != 3:
+            QtWidgets.QMessageBox.information(
+                self.window, "Edit points in 3D",
+                "Select a plate with exactly three points first.")
+            return
+
+        original = [list(point[:3]) for point in obj["pts"]]
+        working = [point[:] for point in original]
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle(f"Edit plate points in 3D — {obj.get('name', 'Plate')}")
+        dialog.setMinimumWidth(430)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(QtWidgets.QLabel(
+            "Use the X/Y/Z axis controls to move the selected plate point. "
+            "Changes are previewed in the 3D view and saved only when you press Save."))
+
+        point_select = QtWidgets.QComboBox()
+        point_select.addItems(["Point 1", "Point 2", "Point 3"])
+        layout.addWidget(point_select)
+        grid = QtWidgets.QGridLayout()
+        grid.addWidget(QtWidgets.QLabel("Axis"), 0, 0)
+        grid.addWidget(QtWidgets.QLabel("Coordinate"), 0, 1)
+        grid.addWidget(QtWidgets.QLabel("−"), 0, 2)
+        grid.addWidget(QtWidgets.QLabel("+"), 0, 3)
+        fields = []
+        for axis, name in enumerate(("X", "Y", "Z")):
+            grid.addWidget(QtWidgets.QLabel(f"{name} axis"), axis + 1, 0)
+            field = QtWidgets.QDoubleSpinBox()
+            field.setRange(-100000.0, 100000.0)
+            field.setDecimals(3)
+            field.setSingleStep(0.1)
+            fields.append(field)
+            grid.addWidget(field, axis + 1, 1)
+            minus = QtWidgets.QPushButton("−")
+            plus = QtWidgets.QPushButton("+")
+            minus.clicked.connect(lambda checked=False, a=axis: nudge(a, -1))
+            plus.clicked.connect(lambda checked=False, a=axis: nudge(a, 1))
+            grid.addWidget(minus, axis + 1, 2)
+            grid.addWidget(plus, axis + 1, 3)
+        layout.addLayout(grid)
+        increment = QtWidgets.QDoubleSpinBox()
+        increment.setRange(0.001, 1000.0)
+        increment.setDecimals(3)
+        increment.setSingleStep(0.1)
+        increment.setValue(0.1)
+        increment.setSuffix(" in per axis click")
+        layout.addWidget(increment)
+        status = QtWidgets.QLabel()
+        status.setWordWrap(True)
+        layout.addWidget(status)
+
+        def refresh():
+            point = working[point_select.currentIndex()]
+            for axis, field in enumerate(fields):
+                field.blockSignals(True)
+                field.setValue(float(point[axis]))
+                field.blockSignals(False)
+            status.setText(
+                "Previewing Point "
+                f"{point_select.currentIndex() + 1}: "
+                + ", ".join(f"{axis} {point[n]:+.3f} in" for n, axis in enumerate(("X", "Y", "Z"))))
+            self.dirty = True
+
+        def update_value(axis, value):
+            working[point_select.currentIndex()][axis] = float(value)
+            if plate_dims({"type": "plate", "pts": working}) is None:
+                status.setText("Preview invalid: points must remain distinct and non-collinear.")
+            else:
+                obj["pts"] = [point[:] for point in working]
+                refresh()
+
+        def nudge(axis, sign):
+            field = fields[axis]
+            field.setValue(field.value() + sign * increment.value())
+
+        from .model3d import plate_dims
+        point_select.currentIndexChanged.connect(lambda _index: refresh())
+        for axis, field in enumerate(fields):
+            field.valueChanged.connect(lambda value, a=axis: update_value(a, value))
+        refresh()
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            obj["pts"] = original
+            self.dirty = True
+            return
+        if plate_dims({"type": "plate", "pts": working}) is None:
+            QtWidgets.QMessageBox.warning(
+                self.window, "Edit points in 3D",
+                "The three points must be distinct and non-collinear.")
+            obj["pts"] = original
+            self.dirty = True
+            return
+        obj["pts"] = working
+        self.cfg.set("objects", self.objects)
+        self.cfg.save()
+        self._refresh_objects()
+        self.object_list.setCurrentRow(i)
+        self.dirty = True
+        self.teach_label.setText(f"Updated {obj_summary(obj)}")
+        self.log(f"Updated plate axes for {obj_summary(obj)}")
 
     def _object_point_to_target(self, n):
         i = self.object_list.currentRow()
@@ -2772,12 +2947,16 @@ class QtApp:
         if self.gaussian_splats.isChecked() and getattr(self, "camera_frame", None) is not None:
             hud["camera_view"] = self.camera_frame
             hud["camera_name"] = f"Discord camera {self.camera_source.currentIndex() + 1}"
-        calibration = self.cfg.get("camera_texture")
+        calibration = self._active_camera_calibration()
         if (self.camera_texture.isChecked() and calibration and
                 getattr(self, "camera_frame", None) is not None):
             hud["camera_view"] = self.camera_frame
             hud["camera_texture"] = calibration
             hud["camera_landmarks"] = self._camera_landmarks(self.q_vis)
+        if (self.camera_overlay.isChecked() and
+                getattr(self, "camera_frame", None) is not None):
+            hud["camera_overlay"] = self.camera_frame
+            hud["camera_overlay_alpha"] = self.camera_overlay_alpha.value()
         if snap.pose is not None: hud["tip_text"] = "  ".join(fmt_pos(snap.pose[i]) for i in range(3)) + " in"
         else: hud["msg"] = "Open Setup to select the number table"
         ghost_tris = ghost_tip = None; ghost_ok = True; ghost_col = hex_rgb(C.green)

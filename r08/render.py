@@ -413,6 +413,14 @@ def draw_overlay(img, v, fr):
     if fr.gizmo:
         _gizmo(img, v, fr.tip, labels)
     hud = fr.hud or {}
+    camera_overlay = hud.get("camera_overlay")
+    if camera_overlay is not None and camera_overlay.size:
+        try:
+            overlay = cv2.resize(camera_overlay, (w, h), interpolation=cv2.INTER_AREA)
+            alpha = float(np.clip(hud.get("camera_overlay_alpha", 0.35), 0.0, 1.0))
+            cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
+        except cv2.error:
+            pass
     if hud.get("camera_texture"):
         _projected_camera_texture(img, v, fr.tris, hud.get("camera_view"), hud["camera_texture"])
     if hud.get("camera_landmarks"):
