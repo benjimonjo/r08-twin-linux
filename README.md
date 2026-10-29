@@ -16,7 +16,10 @@ Wayland sessions.
 
 ### 1. Install Linux dependencies
 
-On Debian or Ubuntu:
+Choose the command for your distribution. Debian-based derivatives such as
+Linux Mint and Pop!_OS use the Debian/Ubuntu command.
+
+#### Debian, Ubuntu, Linux Mint, and Pop!_OS
 
 ```bash
 sudo apt update
@@ -26,10 +29,38 @@ sudo apt install \
   xdg-desktop-portal xdg-desktop-portal-kde
 ```
 
-Make sure the KDE portal backend is running for the desktop session. On other
-distributions, install the equivalent packages for Python GObject bindings,
-libportal/Xdp introspection, GStreamer PipeWire support, Tesseract, and the
-desktop portal backend.
+#### Fedora
+
+```bash
+sudo dnf install \
+  python3 python3-pip python3-devel python3-gobject \
+  libportal-devel gstreamer1-plugin-pipewire tesseract \
+  xdg-desktop-portal xdg-desktop-portal-kde
+```
+
+#### Arch Linux and Manjaro
+
+```bash
+sudo pacman -S --needed \
+  python python-pip python-virtualenv python-gobject \
+  libportal gst-plugin-pipewire tesseract \
+  xdg-desktop-portal xdg-desktop-portal-kde
+```
+
+#### openSUSE Tumbleweed and Leap
+
+```bash
+sudo zypper install \
+  python3 python3-pip python3-devel python3-gobject \
+  libportal-devel gstreamer-plugin-pipewire tesseract-ocr \
+  xdg-desktop-portal xdg-desktop-portal-kde
+```
+
+If a package name differs on your release, install the equivalent packages
+for Python GObject bindings, libportal/Xdp introspection, GStreamer PipeWire
+support, Tesseract, and the desktop portal backend. The KDE portal backend
+(`xdg-desktop-portal-kde`) is required for the Wayland screen-share chooser;
+GNOME users can substitute `xdg-desktop-portal-gnome`.
 
 ### 2. Create a virtual environment and install Python dependencies
 
@@ -87,12 +118,30 @@ landmarks in this order: base, J1 through J6, flange, and tool tip. Each camera
 has its own saved calibration. The camera texture can be projected onto the
 reconstructed robot, or the live camera image can be blended over the 3D view
 with the adjustable overlay control in the Live twin toolbar.
+After making an initial landmark calibration for a camera, use
+**Auto-refine active camera from robot yellow** to refine its pose from the
+known robot coordinates and FANUC-yellow silhouette. This works best with the
+camera at its saved home position, the robot visible, and stable lighting.
+The automatic pass requires the initial calibration as a safe geometric seed;
+it reports a failure instead of saving an unreliable transform when too few
+yellow landmarks can be matched.
+3D camera presets, follow/trail display, camera overlays, active-camera
+selection, Gaussian view, axis visibility, performance indicators, and the GPU
+or CPU computation method are available from the **3D View** menu. The menu
+also includes a toggle for the `GPU (OpenGL)` renderer label shown in the
+viewport. The GPU method toggle takes effect after restarting R08.
+Configuration actions are available from the **Configuration** tab.
 The main window includes a toggleable **Debug** window. It is a scrollable
 diagnostics panel containing application logs, OCR snapshots and cell previews,
-OCR pose readouts, continuous step-size OCR status and values, automatic button
+the Digit reader's live output and teaching controls, OCR pose readouts,
+continuous step-size OCR status and values, automatic button
 recognition results and coordinates, automatic step-region detection, capture
 errors, and other recognition diagnostics. The live camera preview and
 calibration status are also available in this Debug window.
+The Panel camera controls group continuously OCRs the movement-panel feed for
+the active Camera 1/Camera 2 indicator and updates the selected camera
+calibration automatically. If the panel does not expose a readable camera
+indicator, the readout remains unknown rather than guessing.
 The robot position table and Discord camera region use the same primary
 PipeWire capture session, so they can be selected from one shared screen
 stream. Use **Configuration -> Clear saved PipeWire tokens** when you want the
@@ -110,6 +159,11 @@ coordinates. The Live twin view also shows the moving `C0`, `C1`, etc. markers
 when camera mapping is enabled.
 While a coarse jog step is selected, the position reader increases its sampling
 rate and rereads all six positions so large movements are not skipped.
+The Settings dialog includes **Pose smoothing strength** for regular
+interpolation between the slower OCR coordinate updates. When a calibrated
+camera feed is enabled, **Camera pose contribution** blends visual coordinates
+from the tracked FANUC-yellow arm into that smoothing path; if the yellow mask
+cannot provide enough reliable landmarks, R08 falls back to the OCR pose.
 `pytesseract` and the Tesseract system executable are required for continuous
 step-size OCR and automatic panel-button recognition; manual button setup
 remains available.

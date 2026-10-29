@@ -579,6 +579,7 @@ class App:
         self._chk(body, r + 3, "Use the GPU 3D renderer (restart to apply)", "gpu")
         self._chk(body, r + 4, "Show coordinate axes and tool axis gizmo", "show_axes", self.show_axes)
         self._chk(body, r + 5, "Show FPS/GPU frequency counter", "show_perf", self.show_perf)
+        self._chk(body, r + 6, "Show GPU (OpenGL) renderer text", "show_backend")
 
     def _chk(self, parent, row, text, key, var=None):
         var = var or tk.BooleanVar(value=bool(self.settings.get(key, True)))
@@ -1355,6 +1356,7 @@ class App:
         if show_objs and self._obj_soup is not None:
             tris = tuple(np.concatenate([a, b]) for a, b in zip(tris, self._obj_soup))
         hud = {"backend": self.renderer.name,
+               "show_backend": bool(self.settings.get("show_backend", True)),
                "axes": bool(self.show_axes.get()), "gaussian_splats": bool(self.gaussian_splats.get())}
         if self.settings.get("show_perf", True): hud.update(fps=self.fps, gpu=self.gpu_usage)
         if snap.pose is not None:

@@ -730,6 +730,45 @@ class ButtonRecognitionWorker(QtCore.QThread):
         except Exception as exc: self.finished_result.emit(False, str(exc))
 
 
+def detect_active_camera(capture, button_region):
+    if not HAVE_TESS or pytesseract is None or not button_region:
+        return None, "Camera identity OCR unavailable"
+    regions = [button_region]
+    monitor = capture.monitors[0] if capture.monitors else None
+    if monitor and dict(monitor) != dict(button_region):
+        regions.append(monitor)
+    last_text = ""
+    for region in regions:
+        image = np.asarray(capture.grab(region))
+        gray = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+        enlarged = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+        text = pytesseract.image_to_string(
+            enlarged, config="--oem 3 --psm 11",
+            timeout=2).upper().replace("−", "-")
+        compact = re.sub(r"\s+", " ", text)
+        last_text = compact
+        match = re.search(r"\b(?:CAMERA|CAM|CAME?RA)\s*([12])\b", compact)
+        if match:
+            return int(match.group(1)), f"Movement panel reports Camera {match.group(1)}"
+        match = re.search(r"\b(?:ACTIVE|SELECTED)\s*[:\-]?\s*([12])\b", compact)
+        if match:
+            return int(match.group(1)), f"Movement panel reports Camera {match.group(1)}"
+    return None, f"Camera identity not found in panel OCR: {last_text[:120] or 'no text'}"
+
+
+class ActiveCameraWorker(QtCore.QThread):
+    finished_result = QtCore.Signal(bool, object)
+    def __init__(self, capture, button_region, parent=None):
+        super().__init__(parent)
+        self.capture, self.button_region = capture, button_region
+
+    def run(self):
+        try:
+            self.finished_result.emit(True, detect_active_camera(self.capture, self.button_region))
+        except Exception as exc:
+            self.finished_result.emit(False, str(exc))
+
+
 class CaptureInitWorker(QtCore.QThread):
     finished_result = QtCore.Signal(bool, object)
     def __init__(self, separate=False, source=None, restore_token=None, parent=None):
@@ -958,6 +997,8 @@ class QtApp:
         self.capture_init_worker = None
         self.capture_init_purpose = None
         self.capture_init_restore_token = None
+        self.active_camera_worker = None
+        self.active_camera_check_time = 0.0
         self.portal_selection_hint = None
         self.auto_recognition_after_region = False
         self.startup_capture_started = False
@@ -968,6 +1009,9 @@ class QtApp:
         self.robot_mesh, self.ghost_mesh, self.cam = RobotMesh(), RobotMesh(), Camera()
         self.q_vis = np.radians([0, 35, 25, 0, 40, 0]); self.q_target = self.q_vis.copy()
         self.q_vis_velocity = np.zeros(6)
+        self.visual_q = None
+        self.visual_q_time = 0.0
+        self.visual_arm_point = None
         self.live_t = self.ghost_t = None; self.ghost = None; self.trail = []; self.dirty = True
         self.follow_tool = False; self.show_trail = True
         self.guided_plan = []; self.guided_index = 0; self.guided_before = None
@@ -1057,7 +1101,7 @@ class QtApp:
         brand = QtWidgets.QLabel("R08  live twin  ·  FANUC R-2000iA/200F"); brand.setStyleSheet(f"color:{C.yellow};font-size:16px;font-weight:700")
         header.addWidget(brand); header.addStretch()
         self.read_state = QtWidgets.QLabel("Waiting for setup"); header.addWidget(self.read_state)
-        setup = QtWidgets.QPushButton("Configuration"); setup.clicked.connect(self._show_configuration); header.addWidget(setup)
+        view_menu = QtWidgets.QPushButton("3D View"); header.addWidget(view_menu)
         helpb = QtWidgets.QPushButton("Help"); helpb.clicked.connect(self._help); header.addWidget(helpb)
         settingsb = QtWidgets.QPushButton("Settings"); settingsb.clicked.connect(self._settings); header.addWidget(settingsb)
         debugb = QtWidgets.QPushButton("Debug"); debugb.clicked.connect(self._toggle_debug); header.addWidget(debugb)
@@ -1073,33 +1117,74 @@ class QtApp:
         self.image_label.setMinimumSize(460, 360); self.image_label.setStyleSheet("background:#0f1115;border:1px solid #303641")
         self.image_label.dragged.connect(self._camera_drag); self.image_label.wheeled.connect(self._camera_zoom)
         ll.addWidget(self.image_label, 1)
-        views = QtWidgets.QHBoxLayout(); ll.insertLayout(0, views)
+        self.view_menu = QtWidgets.QMenu(self.window)
+        view_menu.setMenu(self.view_menu)
         for name in ("iso", "front", "side", "top"):
-            b = QtWidgets.QPushButton(name.title()); b.clicked.connect(lambda checked=False, n=name: self._camera_preset(n)); views.addWidget(b)
-        reset_view = QtWidgets.QPushButton("Reset view"); reset_view.clicked.connect(lambda: self._camera_preset("reset")); views.addWidget(reset_view)
-        follow = QtWidgets.QCheckBox("Follow tool"); follow.toggled.connect(self._set_follow); views.addWidget(follow)
-        trail = QtWidgets.QCheckBox("Trail"); trail.setChecked(True); trail.toggled.connect(self._set_trail); views.addWidget(trail)
+            self.view_menu.addAction(name.title(), lambda checked=False, n=name: self._camera_preset(n))
+        self.view_menu.addAction("Reset view", lambda: self._camera_preset("reset"))
+        self.view_menu.addSeparator()
+        follow = QtGui.QAction("Follow tool", self.view_menu); follow.setCheckable(True)
+        follow.toggled.connect(self._set_follow); self.view_menu.addAction(follow)
+        trail = QtGui.QAction("Trail", self.view_menu); trail.setCheckable(True); trail.setChecked(True)
+        trail.toggled.connect(self._set_trail); self.view_menu.addAction(trail)
         self.gaussian_splats = QtWidgets.QCheckBox("Gaussian splat view")
         self.gaussian_splats.setToolTip("Render mapped objects as soft splats and show the active Discord camera as Gaussian image points")
-        self.gaussian_splats.toggled.connect(self._mark_dirty); views.addWidget(self.gaussian_splats)
+        self.gaussian_splats.setVisible(False)
+        gaussian_action = QtGui.QAction("Gaussian splat view", self.view_menu); gaussian_action.setCheckable(True)
+        gaussian_action.toggled.connect(self.gaussian_splats.setChecked); self.gaussian_splats.toggled.connect(self._mark_dirty)
+        self.view_menu.addAction(gaussian_action)
         self.camera_texture = QtWidgets.QCheckBox("Map camera onto robot")
         self.camera_texture.setToolTip("Show the live camera texture projected onto the reconstructed robot after calibration.")
         self.camera_texture.setChecked(bool(self.cfg.get("camera_texture_enabled", False)))
-        self.camera_texture.toggled.connect(self._camera_texture_toggled); views.addWidget(self.camera_texture)
+        self.camera_texture.setVisible(False)
+        texture_action = QtGui.QAction("Map camera onto robot", self.view_menu); texture_action.setCheckable(True)
+        texture_action.setChecked(self.camera_texture.isChecked())
+        texture_action.toggled.connect(self.camera_texture.setChecked); self.camera_texture.toggled.connect(self._camera_texture_toggled)
+        self.view_menu.addAction(texture_action)
         self.camera_overlay = QtWidgets.QCheckBox("Overlay camera feed")
         self.camera_overlay.setToolTip("Blend the active camera image over the 3D view.")
         self.camera_overlay.setChecked(bool(self.cfg.get("camera_overlay_enabled", False)))
-        self.camera_overlay.toggled.connect(self._camera_overlay_toggled); views.addWidget(self.camera_overlay)
+        self.camera_overlay.setVisible(False)
+        overlay_action = QtGui.QAction("Overlay camera feed", self.view_menu); overlay_action.setCheckable(True)
+        overlay_action.setChecked(self.camera_overlay.isChecked())
+        overlay_action.toggled.connect(self.camera_overlay.setChecked); self.camera_overlay.toggled.connect(self._camera_overlay_toggled)
+        self.view_menu.addAction(overlay_action)
         self.camera_overlay_alpha = QtWidgets.QDoubleSpinBox()
         self.camera_overlay_alpha.setRange(0.05, 0.95)
         self.camera_overlay_alpha.setSingleStep(0.05)
         self.camera_overlay_alpha.setValue(float(self.cfg.get("camera_overlay_alpha", 0.35)))
         self.camera_overlay_alpha.setSuffix(" overlay")
         self.camera_overlay_alpha.valueChanged.connect(self._camera_overlay_alpha_changed)
-        views.addWidget(self.camera_overlay_alpha)
+        self.camera_overlay_alpha.setVisible(False)
+        self.view_menu.addAction("Set overlay opacity…", self._choose_overlay_alpha)
         self.camera_source = QtWidgets.QComboBox(); self.camera_source.addItems(["Stream camera 1", "Stream camera 2"])
         self.camera_source.setToolTip("Select the label for the camera currently selected in the Discord stream")
-        self.camera_source.currentIndexChanged.connect(self._camera_source_changed); views.addWidget(self.camera_source)
+        self.camera_source.setVisible(False)
+        camera_menu = self.view_menu.addMenu("Active camera")
+        self.camera_menu_actions = []
+        for index, name in enumerate(("Camera 1", "Camera 2")):
+            action = camera_menu.addAction(name)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked=False, i=index: self.camera_source.setCurrentIndex(i))
+            self.camera_menu_actions.append(action)
+        self.camera_source.currentIndexChanged.connect(self._camera_source_changed)
+        self.view_menu.addSeparator()
+        for key, label in (("show_axes", "Show coordinate axes and tool gizmo"),
+                           ("show_perf", "Show FPS/GPU counter"),
+                           ("show_backend", "Show GPU (OpenGL) renderer text")):
+            action = QtGui.QAction(label, self.view_menu)
+            action.setCheckable(True)
+            action.setChecked(bool(self.settings.get(key, True)))
+            action.toggled.connect(lambda checked, k=key: self._set_view_setting(k, checked))
+            self.view_menu.addAction(action)
+        gpu_action = QtGui.QAction("Use GPU computation (OpenGL)", self.view_menu)
+        gpu_action.setCheckable(True)
+        gpu_action.setChecked(bool(self.settings.get("gpu", True)))
+        gpu_action.setToolTip("Use the OpenGL renderer instead of the CPU renderer. Restart required.")
+        gpu_action.toggled.connect(self._set_gpu_renderer)
+        self.view_menu.addAction(gpu_action)
+        self.view_menu.addSeparator()
+        self.view_menu.addAction("Open Configuration pane", self._show_configuration)
         split.addWidget(left)
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setMinimumWidth(370); scroll.setMaximumWidth(470)
         side = QtWidgets.QWidget(); sl = QtWidgets.QVBoxLayout(side); sl.setContentsMargins(4, 2, 4, 2)
@@ -1118,20 +1203,24 @@ class QtApp:
         sl.addWidget(status)
         camera_controls = self._group("Panel camera controls")
         camera_grid = QtWidgets.QGridLayout(camera_controls)
+        self.active_camera_label = QtWidgets.QLabel("Detected active camera: waiting for movement-panel OCR")
+        self.active_camera_label.setWordWrap(True)
+        self.active_camera_label.setProperty("muted", True)
+        camera_grid.addWidget(self.active_camera_label, 0, 0, 1, 3)
         for index, name in enumerate(("Up", "Down", "Left", "Right", "Zoom+", "Zoom-")):
             button = QtWidgets.QPushButton(name)
             button.clicked.connect(lambda checked=False, n=name: self._panel_camera_action(n))
-            camera_grid.addWidget(button, index // 3, index % 3)
+            camera_grid.addWidget(button, index // 3 + 1, index % 3)
         for column, name in enumerate(("Camera Step+", "Camera Step-")):
             button = QtWidgets.QPushButton(name)
             button.clicked.connect(lambda checked=False, n=name: self._panel_camera_action(n))
-            camera_grid.addWidget(button, 3, column)
+            camera_grid.addWidget(button, 4, column)
         reset_camera = QtWidgets.QPushButton("Reset Camera")
         reset_camera.clicked.connect(lambda: self._panel_camera_action("Reset Camera"))
-        camera_grid.addWidget(reset_camera, 2, 0, 1, 2)
+        camera_grid.addWidget(reset_camera, 3, 0, 1, 2)
         switch_camera = QtWidgets.QPushButton("Switch Camera")
         switch_camera.clicked.connect(lambda: self._panel_camera_action("Switch Camera"))
-        camera_grid.addWidget(switch_camera, 2, 2)
+        camera_grid.addWidget(switch_camera, 3, 2)
         sl.addWidget(camera_controls)
         safety = self._group("Panel safety controls")
         safety_grid = QtWidgets.QHBoxLayout(safety)
@@ -1212,10 +1301,6 @@ class QtApp:
             b = QtWidgets.QPushButton(f"Point {idx+1} to target"); b.clicked.connect(lambda checked=False, n=idx: self._object_point_to_target(n)); ol.addWidget(b)
         self.show_objects = QtWidgets.QCheckBox("Show mapped objects"); self.show_objects.setChecked(True); self.show_objects.toggled.connect(self._mark_dirty); ol.addWidget(self.show_objects)
         self._refresh_objects(); sl.addWidget(objects)
-        digit = self._group("Digit reader"); dl = QtWidgets.QVBoxLayout(digit)
-        self.raw_label = QtWidgets.QLabel("Waiting for the number table…"); self.raw_label.setWordWrap(True); dl.addWidget(self.raw_label)
-        teach = QtWidgets.QPushButton("Teach digits…"); teach.clicked.connect(self._teach_digits); dl.addWidget(teach); sl.addWidget(digit)
-        debug = QtWidgets.QPushButton("Save OCR snapshot"); debug.clicked.connect(self._save_ocr_snapshot); dl.addWidget(debug)
         sl.addStretch(); scroll.setWidget(side); split.addWidget(scroll); split.setStretchFactor(0, 3); split.setStretchFactor(1, 1)
         self._build_config_tab(tabs)
         self.window.menuBar().setNativeMenuBar(True)
@@ -1292,6 +1377,18 @@ class QtApp:
         ocr_layout.addLayout(cell_grid)
         layout.addWidget(ocr)
 
+        digit = self._group("Digit reader")
+        digit_layout = QtWidgets.QVBoxLayout(digit)
+        digit_layout.addWidget(QtWidgets.QLabel(
+            "Live OCR output and digit teaching for the six-value FANUC position table."))
+        self.raw_label = QtWidgets.QLabel("Waiting for the number table…")
+        self.raw_label.setWordWrap(True)
+        digit_layout.addWidget(self.raw_label)
+        teach = QtWidgets.QPushButton("Teach digits…")
+        teach.clicked.connect(self._teach_digits)
+        digit_layout.addWidget(teach)
+        layout.addWidget(digit)
+
         debug = self._group("Camera debug view")
         debug_layout = QtWidgets.QVBoxLayout(debug)
         self.debug_camera_preview = QtWidgets.QCheckBox("Show live camera preview")
@@ -1332,9 +1429,115 @@ class QtApp:
         self.cfg.save()
         self.dirty = True
 
+    def _choose_overlay_alpha(self):
+        value, ok = QtWidgets.QInputDialog.getDouble(
+            self.window, "Camera overlay opacity", "Opacity:",
+            self.camera_overlay_alpha.value(), 0.05, 0.95, 2)
+        if ok:
+            self.camera_overlay_alpha.setValue(value)
+
     def _camera_source_changed(self, *_):
+        for index, action in enumerate(getattr(self, "camera_menu_actions", [])):
+            action.setChecked(index == self.camera_source.currentIndex())
         self._refresh_debug_calibration_status()
         self.dirty = True
+
+    def _estimate_visual_q(self, frame, calibration, seed_q):
+        if not calibration or not frame.size:
+            return None
+        try:
+            matrix = np.asarray(calibration["camera_matrix"], np.float64)
+            rvec = np.asarray(calibration["rvec"], np.float64).reshape(3, 1)
+            tvec = np.asarray(calibration["tvec"], np.float64).reshape(3, 1)
+            hsv = cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_RGB2HSV)
+            mask = cv2.inRange(hsv, np.array([18, 70, 70], np.uint8),
+                               np.array([42, 255, 255], np.uint8))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+            if cv2.countNonZero(mask) < 400:
+                return None
+            ys, xs = np.where(mask > 0)
+            self.visual_arm_point = np.array([float(xs.mean()), float(ys.mean())])
+            points = np.asarray(self._camera_landmarks(seed_q), np.float32)
+            projected, _ = cv2.projectPoints(points, rvec, tvec, matrix, np.zeros(5))
+            projected = projected.reshape(-1, 2)
+            observed = []
+            used = []
+            radius = 48.0
+            for index, point in enumerate(projected[1:], 1):
+                distance = np.sum((np.column_stack((xs, ys)) - point) ** 2, axis=1)
+                nearest = int(np.argmin(distance))
+                if distance[nearest] <= radius * radius:
+                    observed.append(np.array([xs[nearest], ys[nearest]], float))
+                    used.append(index)
+            if len(used) < 4:
+                return None
+            base_projection = projected[used]
+            residual = np.asarray(observed) - base_projection
+            jacobian = np.zeros((len(used) * 2, 6), float)
+            for axis in range(6):
+                trial = np.asarray(seed_q, float).copy()
+                trial[axis] += 0.004
+                trial_points, _ = cv2.projectPoints(
+                    np.asarray(self._camera_landmarks(trial), np.float32),
+                    rvec, tvec, matrix, np.zeros(5))
+                jacobian[:, axis] = (
+                    (trial_points.reshape(-1, 2)[used] - base_projection) / 0.004
+                ).reshape(-1)
+            delta, _, _, _ = np.linalg.lstsq(jacobian, residual.reshape(-1), rcond=None)
+            delta = np.clip(delta, -0.10, 0.10)
+            return K.unwrap_q_to_reference(np.asarray(seed_q) + delta, seed_q)
+        except (KeyError, ValueError, cv2.error, np.linalg.LinAlgError):
+            return None
+
+    def _check_active_camera(self, now):
+        if (self.active_camera_worker is not None and
+                self.active_camera_worker.isRunning()):
+            return
+        if now < self.active_camera_check_time:
+            return
+        region = self.cfg.get("button_region")
+        if self.button_capture is None or not region or not HAVE_TESS:
+            return
+        self.active_camera_check_time = now + 2.0
+        self.active_camera_worker = ActiveCameraWorker(
+            self.button_capture, region, self.window)
+        self.active_camera_worker.finished_result.connect(self._active_camera_finished)
+        self.active_camera_worker.start()
+
+    def _active_camera_finished(self, ok, result):
+        self.active_camera_worker = None
+        if not ok:
+            self.active_camera_label.setText(f"Detected active camera: error ({result})")
+            return
+        camera_index, detail = result
+        if camera_index in (1, 2):
+            self.camera_source.setCurrentIndex(camera_index - 1)
+            self.active_camera_label.setText(
+                f"Detected active camera: Camera {camera_index} · {detail}")
+        else:
+            self.active_camera_label.setText(f"Detected active camera: unknown · {detail}")
+
+    def _set_view_setting(self, key, value):
+        self.settings[key] = bool(value)
+        self.cfg.set("settings", self.settings)
+        self.cfg.save()
+        self.dirty = True
+
+    def _set_gpu_renderer(self, enabled):
+        enabled = bool(enabled)
+        if enabled == bool(self.settings.get("gpu", True)):
+            return
+        self.settings["gpu"] = enabled
+        self.cfg.set("settings", self.settings)
+        self.cfg.save()
+        answer = QtWidgets.QMessageBox.question(
+            self.window, "GPU computation method",
+            "The renderer method changes after restarting R08. Restart now?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.Yes)
+        if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._reload_application(confirm=False)
 
     def _active_camera_calibration(self):
         calibrations = self.cfg.get("camera_texture_calibrations", {}) or {}
@@ -1415,8 +1618,11 @@ class QtApp:
             QtGui.QPixmap.fromImage(qimg).scaled(
                 900, 340, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                 QtCore.Qt.TransformationMode.SmoothTransformation))
+        visual = self.visual_arm_point
+        visual_text = (f" · visual arm center ({visual[0]:.0f}, {visual[1]:.0f}) px"
+                       if visual is not None else "")
         self.debug_camera_status.setText(
-            f"Live camera frame: {w} × {h} px  ·  updated {time.strftime('%H:%M:%S')}")
+            f"Live camera frame: {w} × {h} px  ·  updated {time.strftime('%H:%M:%S')}{visual_text}")
 
     def _calibrate_camera_texture(self):
         camera_region = self.cfg.get("camera_region")
@@ -1474,6 +1680,94 @@ class QtApp:
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self.window, "Camera calibration", str(exc))
 
+    def _auto_calibrate_camera(self):
+        camera_region = self.cfg.get("camera_region")
+        calibration = self._active_camera_calibration()
+        if not camera_region:
+            QtWidgets.QMessageBox.warning(
+                self.window, "Automatic camera calibration",
+                "Select the Discord camera video region first.")
+            return
+        if not calibration:
+            QtWidgets.QMessageBox.warning(
+                self.window, "Automatic camera calibration",
+                "Make one initial landmark calibration for this camera first. "
+                "Automatic calibration uses the robot's yellow silhouette to refine it.")
+            return
+        try:
+            if self.capture is None:
+                self.capture = new_mss()
+            shot = np.asarray(self.capture.grab(camera_region))
+            frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(
+                hsv, np.array([18, 75, 90], np.uint8),
+                np.array([42, 255, 255], np.uint8))
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            if cv2.countNonZero(mask) < 500:
+                raise RuntimeError("The camera frame does not contain enough FANUC-yellow pixels.")
+
+            points = np.asarray(self._camera_landmarks(self.q_vis), np.float32)
+            matrix = np.asarray(calibration["camera_matrix"], np.float64)
+            rvec = np.asarray(calibration["rvec"], np.float64).reshape(3, 1)
+            tvec = np.asarray(calibration["tvec"], np.float64).reshape(3, 1)
+            projected, _ = cv2.projectPoints(points, rvec, tvec, matrix, np.zeros(5))
+            projected = projected.reshape(-1, 2)
+            image_points = []
+            object_points = []
+            radius = 38
+            for point, image_point in zip(points, projected):
+                x, y = np.rint(image_point).astype(int)
+                x0, x1 = max(0, x - radius), min(mask.shape[1], x + radius + 1)
+                y0, y1 = max(0, y - radius), min(mask.shape[0], y + radius + 1)
+                region = mask[y0:y1, x0:x1]
+                ys, xs = np.where(region > 0)
+                if not len(xs):
+                    continue
+                candidate = np.column_stack((xs + x0, ys + y0)).astype(float)
+                nearest = candidate[np.argmin(np.sum((candidate - image_point) ** 2, axis=1))]
+                image_points.append(nearest)
+                object_points.append(point)
+            if len(object_points) < 6:
+                raise RuntimeError(
+                    f"Only {len(object_points)} robot landmarks matched the yellow mask; "
+                    "improve lighting or use the manual calibration first.")
+            ok, refined_rvec, refined_tvec, inliers = cv2.solvePnPRansac(
+                np.asarray(object_points, np.float32),
+                np.asarray(image_points, np.float32),
+                matrix, np.zeros(5), rvec, tvec,
+                useExtrinsicGuess=True, iterationsCount=100,
+                reprojectionError=12.0, confidence=0.99,
+                flags=cv2.SOLVEPNP_ITERATIVE)
+            if not ok or inliers is None or len(inliers) < 6:
+                raise RuntimeError("The yellow-mask matches were not consistent enough to refine the camera.")
+            updated = dict(calibration)
+            updated["rvec"] = refined_rvec.reshape(-1).tolist()
+            updated["tvec"] = refined_tvec.reshape(-1).tolist()
+            updated["auto_refined"] = True
+            updated["auto_inliers"] = int(len(inliers))
+            calibrations = self.cfg.get("camera_texture_calibrations", {}) or {}
+            calibrations[str(self.camera_source.currentIndex() + 1)] = updated
+            self.cfg.set("camera_texture_calibrations", calibrations)
+            if self.camera_source.currentIndex() == 0:
+                self.cfg.set("camera_texture", updated)
+            self.cfg.save()
+            self._refresh_debug_calibration_status()
+            self._update_debug_camera_view()
+            self.dirty = True
+            self.log(
+                f"Auto-refined Camera {self.camera_source.currentIndex() + 1} "
+                f"from robot yellow mask ({len(inliers)} inliers).")
+            QtWidgets.QMessageBox.information(
+                self.window, "Automatic camera calibration",
+                f"Camera {self.camera_source.currentIndex() + 1} refined using "
+                f"{len(inliers)} robot landmarks.")
+        except (KeyError, ValueError, cv2.error, RuntimeError) as exc:
+            self.log(f"Automatic camera calibration failed: {exc}")
+            QtWidgets.QMessageBox.warning(self.window, "Automatic camera calibration", str(exc))
+
     def _build_config_tab(self, tabs):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
@@ -1509,9 +1803,16 @@ class QtApp:
         calibrate = QtWidgets.QPushButton("Calibrate active camera using robot points")
         calibrate.clicked.connect(self._calibrate_camera_texture)
         capture_layout.addWidget(calibrate, 5, 0, 1, 2)
+        auto_calibrate = QtWidgets.QPushButton("Auto-refine active camera from robot yellow")
+        auto_calibrate.setToolTip("Use the known robot pose and its yellow mask to refine the active camera calibration.")
+        auto_calibrate.clicked.connect(self._auto_calibrate_camera)
+        capture_layout.addWidget(auto_calibrate, 6, 0, 1, 2)
         capture_layout.addWidget(QtWidgets.QLabel(
             "Select Camera 1 or Camera 2 in the Live twin toolbar, switch that PTZ camera to its home position, then calibrate it here."),
-            6, 0, 1, 2)
+            7, 0, 1, 2)
+        capture_layout.addWidget(QtWidgets.QLabel("Camera to calibrate"), 8, 0)
+        self.camera_source.setVisible(True)
+        capture_layout.addWidget(self.camera_source, 8, 1)
         layout.addWidget(capture)
 
         panel = self._group("Movement panel")
@@ -1628,9 +1929,7 @@ class QtApp:
             spin.setValue(float(self.settings.get(key, low))); controls[key] = spin; form.addRow(label, spin)
         toggles = {}
         for key, label in (("verify_each", "Verify pose after each action"), ("step_plus_larger", "Step+ increases the step size"),
-                           ("self_learn", "Learn from confident digit reads"), ("gpu", "Use GPU renderer (restart to apply)"),
-                           ("show_axes", "Show coordinate axes and tool axis gizmo"),
-                           ("show_perf", "Show FPS/GPU frequency counter")):
+                           ("self_learn", "Learn from confident digit reads")):
             check = QtWidgets.QCheckBox(label); check.setChecked(bool(self.settings.get(key, True))); toggles[key] = check; form.addRow(check)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject); form.addRow(buttons)
@@ -2857,6 +3156,7 @@ class QtApp:
 
     def _tick(self):
         now = clock(); dt = min(0.1, now - self.last_tick); self.last_tick = now
+        self._check_active_camera(now)
         usage = self.gpu_monitor.latest
         if usage != self.gpu_usage:
             self.gpu_usage = usage; self.dirty = True
@@ -2901,12 +3201,17 @@ class QtApp:
             tip = K.table_pose_to_target(snap.pose)[:3, 3]
             if np.linalg.norm(tip - self.cam.target) > .005:
                 self.cam.target = self.cam.target + (tip - self.cam.target) * (1 - math.exp(-dt * 3)); self.dirty = True
-        diff = self.q_target - self.q_vis
+        target_q = self.q_target.copy()
+        if self.visual_q is not None and now - self.visual_q_time <= 1.0:
+            blend = float(np.clip(self.settings.get("camera_pose_blend", 0.45), 0.0, 1.0))
+            target_q = (1.0 - blend) * target_q + blend * self.visual_q
+        diff = target_q - self.q_vis
         for i in K.INFINITE_JOINTS:
             diff[i] = math.radians(wrap180(math.degrees(diff[i])))
         if np.max(np.abs(diff)) > 2e-4:
             vmax = math.radians(float(self.settings.get("viz_deg_s", 25)))
-            target_velocity = np.clip(diff * 8.0, -vmax, vmax)
+            smoothing = float(np.clip(self.settings.get("pose_smoothing", 0.28), 0.05, 1.0))
+            target_velocity = np.clip(diff * (4.0 + 12.0 * smoothing), -vmax, vmax)
             accel = math.radians(90.0)
             self.q_vis_velocity += np.clip(target_velocity - self.q_vis_velocity, -accel * dt, accel * dt)
             self.q_vis += self.q_vis_velocity * dt; self.dirty = True
@@ -2930,6 +3235,12 @@ class QtApp:
                     shot = np.asarray(self.capture.grab(camera_region))
                     self.camera_frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2RGB)
                     self.camera_frame_time = now; self.dirty = True
+                    calibration = self._active_camera_calibration()
+                    if calibration and (self.camera_texture.isChecked() or self.camera_overlay.isChecked()):
+                        visual_q = self._estimate_visual_q(self.camera_frame, calibration, self.q_vis)
+                        if visual_q is not None:
+                            self.visual_q = visual_q
+                            self.visual_q_time = now
                     self._update_debug_camera_view()
             except Exception as exc:
                 if now - getattr(self, "camera_capture_error_time", 0.0) > 5:
@@ -2941,6 +3252,7 @@ class QtApp:
         w, h = max(400, self.image_label.width()), max(300, self.image_label.height())
         info = self.robot_mesh.update(self.q_vis)
         hud = {"backend": self.renderer.name,
+               "show_backend": bool(self.settings.get("show_backend", True)),
                "axes": bool(self.settings.get("show_axes", True)), "gaussian_splats": self.gaussian_splats.isChecked()}
         if self.settings.get("show_perf", True):
             hud.update(fps=self.fps, gpu=self.gpu_usage)

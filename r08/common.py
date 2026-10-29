@@ -69,10 +69,13 @@ DEFAULT_SETTINGS = {
     "step_plus_larger": True, # does the panel's Step+ make the step bigger?
     "ocr_fps": 15,            # screen scans per second
     "viz_deg_s": 25.0,        # max speed of the DRAWN arm (real robot at low override is slow)
+    "pose_smoothing": 0.28,   # visual pose interpolation strength
+    "camera_pose_blend": 0.45, # camera-assisted pose contribution when calibrated
     "self_learn": True,       # digit reader adds confident new glyph samples to its bank
     "gpu": True,              # use the OpenGL renderer when moderngl is installed
     "show_axes": True,        # show world coordinate axes in the 3D view
     "show_perf": True,        # show the FPS/GPU usage counter
+    "show_backend": True,     # show the renderer name in the 3D view
 }
 
 # ---- theme ----
