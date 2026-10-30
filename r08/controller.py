@@ -27,11 +27,11 @@ VIEW_MAPPING_DEFAULTS = {
     "View pan vertical": "axis3:+",
 }
 STICK_MAPPING_DEFAULTS = {
-    "Position X+": "axis0:+", "Position X-": "axis0:-",
-    "Position Y+": "axis1:-", "Position Y-": "axis1:+",
+    "Position X+": "axis1:+", "Position X-": "axis1:-",
+    "Position Y+": "axis0:+", "Position Y-": "axis0:-",
     "Position Z+": "axis3:-", "Position Z-": "axis3:+",
-    "Angle Xa+": "axis0:+", "Angle Xa-": "axis0:-",
-    "Angle Ya+": "axis1:-", "Angle Ya-": "axis1:+",
+    "Angle Xa+": "axis1:+", "Angle Xa-": "axis1:-",
+    "Angle Ya+": "axis0:+", "Angle Ya-": "axis0:-",
     "Angle Za+": "axis3:-", "Angle Za-": "axis3:+",
     "View orbit horizontal": "axis0:+", "View orbit vertical": "axis1:+",
     "View pan horizontal": "axis2:+", "View pan vertical": "axis3:+",
@@ -42,9 +42,29 @@ AXIS_DEADZONE = 0.55
 
 
 class Controller:
-    def __init__(self, mapping=None, device=0):
+    def __init__(self, mapping=None, device=0, repeat_delay=0.12):
         self.mapping = dict(DEFAULT_MAPPING)
         self.mapping.update(mapping or {})
+        old_axis_defaults = {
+            "Position X+": "axis0:+", "Position X-": "axis0:-",
+            "Position Y+": "axis1:-", "Position Y-": "axis1:+",
+            "Angle Xa+": "axis0:+", "Angle Xa-": "axis0:-",
+            "Angle Ya+": "axis1:-", "Angle Ya-": "axis1:+",
+        }
+        for action, old_control in old_axis_defaults.items():
+            if self.mapping.get(action) == old_control:
+                self.mapping[action] = STICK_MAPPING_DEFAULTS[action]
+        stale_x_pair = (
+            self.mapping.get("X+") == "axis1:-"
+            and self.mapping.get("X-") == "axis1:+"
+            and self.mapping.get("Position X+") == "axis1:-"
+            and self.mapping.get("Position X-") == "axis1:+"
+        )
+        if stale_x_pair:
+            self.mapping.update({
+                "X+": "axis1:+", "X-": "axis1:-",
+                "Position X+": "axis1:+", "Position X-": "axis1:-",
+            })
         for action, control in VIEW_MAPPING_DEFAULTS.items():
             self.mapping.setdefault(action, control)
         for action, control in STICK_MAPPING_DEFAULTS.items():
@@ -59,6 +79,7 @@ class Controller:
         self._hat_value = (0, 0)
         self._axis_values = {}
         self._next_button_repeat = 0.0
+        self.repeat_delay = max(0.01, float(repeat_delay))
         if pygame is not None:
             try:
                 pygame.init()
@@ -68,6 +89,9 @@ class Controller:
                 self.error = str(exc)
         else:
             self.error = "pygame is not installed"
+
+    def set_repeat_delay(self, delay):
+        self.repeat_delay = max(0.01, float(delay))
 
     @staticmethod
     def available():
@@ -194,6 +218,10 @@ class Controller:
                     self._hat_value = event.value
                 elif event.type == pygame.JOYAXISMOTION:
                     self._axis_values[event.axis] = event.value
+            # Some SDL backends do not emit axis events until the window has
+            # focus. Read the current state as well so jogging remains reliable.
+            for axis in range(self.joystick.get_numaxes()):
+                self._axis_values[axis] = self.joystick.get_axis(axis)
 
             if now >= self._next_button_repeat:
                 for action, control in self.mapping.items():
@@ -207,7 +235,7 @@ class Controller:
                         }
                         if directions.get(control.removeprefix("hat0:"), False):
                             out.append((action, 1.0))
-                self._next_button_repeat = now + 0.12
+                self._next_button_repeat = now + self.repeat_delay
 
             if self.mapping.get(ABORT_ACTION) in pressed_buttons:
                 out.append((ABORT_ACTION, 1.0))
@@ -239,6 +267,30 @@ class Controller:
                     "Position X+", "Position X-", "Position Y+", "Position Y-",
                     "Position Z+", "Position Z-",
                 )}
+            legacy_actions = {
+                "Position X+": "X+", "Position X-": "X-",
+                "Position Y+": "Y+", "Position Y-": "Y-",
+                "Position Z+": "Z+", "Position Z-": "Z-",
+                "Angle Xa+": "Xa+", "Angle Xa-": "Xa-",
+                "Angle Ya+": "Ya+", "Angle Ya-": "Ya-",
+                "Angle Za+": "Za+", "Angle Za-": "Za-",
+            }
+            for action, legacy_action in legacy_actions.items():
+                if legacy_action in self.mapping and (
+                    action not in self.mapping
+                    or (
+                        self.mapping.get(action) == STICK_MAPPING_DEFAULTS.get(action)
+                        and self.mapping.get(legacy_action) != DEFAULT_MAPPING.get(legacy_action)
+                    )
+                ):
+                    mappings[action] = self.mapping[legacy_action]
+                elif (
+                    action in self.mapping
+                    and legacy_action in self.mapping
+                    and self.mapping.get(action) != STICK_MAPPING_DEFAULTS.get(action)
+                    and self.mapping.get(legacy_action) == DEFAULT_MAPPING.get(legacy_action)
+                ):
+                    mappings[action] = self.mapping[action]
             for action, control in mappings.items():
                 if not (isinstance(control, str) and control.startswith("axis")):
                     continue
@@ -250,8 +302,12 @@ class Controller:
                 if abs(value) < AXIS_DEADZONE:
                     continue
                 oriented_value = value if sign == "+" else -value
+                if not camera_held and oriented_value < AXIS_DEADZONE:
+                    continue
                 direction = "+" if oriented_value > 0 else "-"
-                magnitude = (abs(oriented_value) - AXIS_DEADZONE) / (1.0 - AXIS_DEADZONE)
+                magnitude = (
+                    (abs(oriented_value) if camera_held else oriented_value) - AXIS_DEADZONE
+                ) / (1.0 - AXIS_DEADZONE)
                 if camera_held:
                     output_action = f"{VIEW_MODIFIER}:{action}:{direction}"
                 else:

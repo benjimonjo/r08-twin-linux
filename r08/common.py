@@ -77,6 +77,9 @@ DEFAULT_SETTINGS = {
     "show_perf": True,        # show the FPS/GPU usage counter
     "show_backend": True,     # show the renderer name in the 3D view
     "controller_enabled": False,
+    "controller_input_mode": "plan",
+    "controller_axis_invert": {},
+    "controller_repeat_delay": 0.12,  # seconds between held-button/D-pad repeats
 }
 
 # ---- theme ----

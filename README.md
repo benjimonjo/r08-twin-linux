@@ -119,8 +119,11 @@ stick axes can be remapped and the camera axes inverted independently.
 joystick axis value live.
 The **Abort** action can also be assigned with **Bind**; it triggers once when
 the selected control is pressed and does not repeat while held.
-Controller input changes the target pose; it does not click the Discord
-movement panel automatically.
+The held-button/D-pad repeat delay is configurable in **Settings** or under
+**Controller → Set held-input repeat delay**. **Controller → Set controller
+input mode** switches between planning a target pose and direct mode. Direct
+mode repeatedly clicks the calibrated robot-panel buttons and requires
+**Automated input (Wayland portal)** plus panel calibration.
 
 ### 3. Start the application
 

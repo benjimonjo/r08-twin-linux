@@ -23,6 +23,7 @@ SETTING_DEFS = [   # key, label, low, high, step
     ("viz_deg_s", "Drawn arm speed limit (\u00b0/s)", 5, 120, 5),
     ("pose_smoothing", "Pose smoothing strength", 0.05, 1.0, 0.05),
     ("camera_pose_blend", "Camera pose contribution", 0.0, 1.0, 0.05),
+    ("controller_repeat_delay", "Controller held-button repeat delay (s)", 0.03, 1.0, 0.01),
 ]
 KEYMAP = {"q": "X+", "a": "X-", "w": "Y+", "s": "Y-", "e": "Z+", "d": "Z-",
           "u": "Xa+", "j": "Xa-", "i": "Ya+", "k": "Ya-", "o": "Za+", "l": "Za-"}

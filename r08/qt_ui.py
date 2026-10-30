@@ -1011,7 +1011,11 @@ class QtApp:
         self.setup_queue = []
         self._interrupt_requested = False
         self.renderer, self.render_note = make_renderer(bool(self.settings.get("gpu", True)))
-        self.controller = Controller(self.cfg.get("controller_mapping"), self.cfg.get("controller_device", 0))
+        self.controller = Controller(
+            self.cfg.get("controller_mapping"),
+            self.cfg.get("controller_device", 0),
+            self.settings.get("controller_repeat_delay", 0.12),
+        )
         self.robot_mesh, self.ghost_mesh, self.cam = RobotMesh(), RobotMesh(), Camera()
         self.q_vis = np.radians([0, 35, 25, 0, 40, 0]); self.q_target = self.q_vis.copy()
         self.q_vis_speed = 0.0
@@ -1023,6 +1027,7 @@ class QtApp:
         self.guided_plan = []; self.guided_index = 0; self.guided_before = None
         self.portal_signals = PortalSignals(); self.portal_signals.ready.connect(self._on_input_ready)
         self.wayland_pointer = None; self.automated_run = False
+        self.direct_controller_run = False
         self.auto_next_allowed = 0.0; self.auto_verify_deadline = 0.0
         self.update_worker = None
         self.workspace_worker = None
@@ -1117,6 +1122,8 @@ class QtApp:
         controller_menu.addAction(self.controller_enabled_action)
         self.controller_status_action = controller_menu.addAction("Status: checking…")
         self.controller_status_action.setEnabled(False)
+        controller_menu.addAction("Set controller input mode…", self._controller_input_mode_dialog)
+        controller_menu.addAction("Set held-input repeat delay…", self._controller_repeat_delay_dialog)
         controller_menu.addAction("Configure button mapping…", self._configure_controller)
         controller_menu.addAction("Controller input readout…", self._controller_readout)
         helpb = QtWidgets.QPushButton("Help"); helpb.clicked.connect(self._help); header.addWidget(helpb)
@@ -1546,6 +1553,60 @@ class QtApp:
         self.cfg.set("settings", self.settings)
         self.cfg.save()
 
+    def _controller_repeat_delay_dialog(self):
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle("Controller repeat delay")
+        form = QtWidgets.QFormLayout(dialog)
+        delay = QtWidgets.QDoubleSpinBox()
+        delay.setRange(0.03, 1.0)
+        delay.setSingleStep(0.01)
+        delay.setDecimals(2)
+        delay.setSuffix(" s")
+        delay.setValue(float(self.settings.get("controller_repeat_delay", 0.12)))
+        form.addRow("Held button / D-pad delay:", delay)
+        hint = QtWidgets.QLabel("Lower values repeat faster while a button or D-pad direction is held.")
+        hint.setWordWrap(True)
+        form.addRow(hint)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.settings["controller_repeat_delay"] = delay.value()
+            self.controller.set_repeat_delay(delay.value())
+            self.cfg.set("settings", self.settings)
+            self.cfg.save()
+            self.log(f"Controller repeat delay set to {delay.value():.2f} s.")
+
+    def _controller_input_mode_dialog(self):
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle("Controller input mode")
+        form = QtWidgets.QFormLayout(dialog)
+        mode = QtWidgets.QComboBox()
+        mode.addItem("Plan target pose (safer)", "plan")
+        mode.addItem("Directly press panel buttons", "direct")
+        current = self.settings.get("controller_input_mode", "plan")
+        mode.setCurrentIndex(max(0, mode.findData(current)))
+        form.addRow("Robot movement mode:", mode)
+        hint = QtWidgets.QLabel(
+            "Direct mode repeatedly clicks the calibrated robot-panel buttons while "
+            "a controller direction is held. Automated input and panel calibration are required.")
+        hint.setWordWrap(True)
+        form.addRow(hint)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.settings["controller_input_mode"] = mode.currentData()
+            self.cfg.set("settings", self.settings)
+            self.cfg.save()
+            self.log(f"Controller input mode set to {mode.currentText()}.")
+
     def _controller_action(self, action, magnitude=1.0):
         if action.startswith(f"{VIEW_MODIFIER}:"):
             _, view_action, direction = action.split(":")
@@ -1569,11 +1630,31 @@ class QtApp:
                 self.cam.pan(0, -amount, max(1, self.image_label.height()))
             self.dirty = True
             return
+        axis_invert = self.cfg.get("controller_axis_invert", {}) or {}
+        invert_key = {
+            "X+": "Position X+", "X-": "Position X+",
+            "Y+": "Position Y+", "Y-": "Position Y+",
+            "Z+": "Position Z+", "Z-": "Position Z+",
+            "Xa+": "Angle Xa+", "Xa-": "Angle Xa+",
+            "Ya+": "Angle Ya+", "Ya-": "Angle Ya+",
+            "Za+": "Angle Za+", "Za-": "Angle Za+",
+        }.get(action, action)
+        if axis_invert.get(invert_key, False):
+            if action.endswith("+"):
+                action = action[:-1] + "-"
+            elif action.endswith("-"):
+                action = action[:-1] + "+"
         if action == "Step+":
+            if self.settings.get("controller_input_mode") == "direct":
+                self._direct_controller_press(action)
+                return
             if magnitude >= 0.5:
                 self.step_combo.setCurrentIndex(min(self.step_combo.count() - 1, self.step_combo.currentIndex() + 1))
             return
         if action == "Step-":
+            if self.settings.get("controller_input_mode") == "direct":
+                self._direct_controller_press(action)
+                return
             if magnitude >= 0.5:
                 self.step_combo.setCurrentIndex(max(0, self.step_combo.currentIndex() - 1))
             return
@@ -1581,14 +1662,31 @@ class QtApp:
             self._panel_camera_action(ABORT_ACTION)
             return
         if action in CONTROLLER_ACTIONS[:12]:
+            if self.settings.get("controller_input_mode") == "direct":
+                self._direct_controller_press(action)
+                return
             axis = CONTROLLER_ACTIONS[:12].index(action) // 2
             sign = 1 if action.endswith("+") else -1
             self._jog_target(axis, sign, magnitude=magnitude)
+
+    def _direct_controller_press(self, action):
+        if not self.cfg.get("auto_input", False):
+            self.log("Direct controller mode requires Automated input to be enabled.")
+            return
+        press = Press(btn=action, kind="controller", verifiable=False, label=f"controller: {action}")
+        if self.direct_controller_run:
+            self.guided_plan.append(press)
+            return
+        self.direct_controller_run = True
+        self.guided_plan = [press]
+        self.guided_index = 0
+        self._start_guided_move()
 
     def _configure_controller(self):
         names = Controller.available()
         dialog = QtWidgets.QDialog(self.window)
         dialog.setWindowTitle("Controller mapping")
+        dialog.resize(760, 620)
         layout = QtWidgets.QVBoxLayout(dialog)
         if not names:
             layout.addWidget(QtWidgets.QLabel(
@@ -1598,7 +1696,15 @@ class QtApp:
         device.setCurrentIndex(min(self.controller.device_index, max(0, len(names) - 1)))
         layout.addWidget(QtWidgets.QLabel("Controller"))
         layout.addWidget(device)
-        form = QtWidgets.QFormLayout(); layout.addLayout(form)
+        mapping_scroll = QtWidgets.QScrollArea()
+        mapping_scroll.setWidgetResizable(True)
+        mapping_scroll.setMinimumHeight(260)
+        mapping_widget = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(mapping_widget)
+        form.setVerticalSpacing(3)
+        form.setContentsMargins(4, 4, 4, 4)
+        mapping_scroll.setWidget(mapping_widget)
+        layout.addWidget(mapping_scroll, 1)
         mapping = dict(self.controller.mapping)
         mapping.setdefault(ANGLE_MODIFIER, 4)
         mapping.setdefault(VIEW_MODIFIER, 5)
@@ -1607,13 +1713,13 @@ class QtApp:
         selectors = {}
         binders = {}
         rows = {}
-        invert_rows = {}
         mapping_actions = (
             CONTROLLER_ACTIONS + (ABORT_ACTION, VIEW_MODIFIER, ANGLE_MODIFIER)
             + tuple(dict.fromkeys(VIEW_AXIS_ACTIONS + tuple(STICK_MAPPING_DEFAULTS)))
         )
         invert_checks = {}
         view_invert = dict(self.cfg.get("controller_view_invert", {}))
+        axis_invert = dict(self.cfg.get("controller_axis_invert", {}))
         capture_timer = QtCore.QTimer(dialog)
         capture_timer.setInterval(50)
         capture_action = [None]
@@ -1624,12 +1730,9 @@ class QtApp:
         def rebuild_buttons(index):
             for row in rows.values():
                 form.removeRow(row)
-            for row in invert_rows.values():
-                form.removeRow(row)
             selectors.clear()
             binders.clear()
             rows.clear()
-            invert_rows.clear()
             invert_checks.clear()
             options = Controller.button_options(index)
             if not options:
@@ -1656,18 +1759,21 @@ class QtApp:
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.addWidget(selector)
                 binder = QtWidgets.QPushButton("Bind")
+                binder.setMaximumWidth(52)
                 row_layout.addWidget(binder)
+                if action in VIEW_AXIS_ACTIONS or action in (
+                    "Position X+", "Position Y+", "Position Z+",
+                    "Angle Xa+", "Angle Ya+", "Angle Za+",
+                ):
+                    invert = QtWidgets.QCheckBox("Invert")
+                    invert.setChecked(bool((view_invert if action in VIEW_AXIS_ACTIONS else axis_invert).get(action, False)))
+                    row_layout.addWidget(invert)
+                    invert_checks[action] = invert
                 form.addRow(action, row)
                 selectors[action] = selector
                 binders[action] = binder
                 rows[action] = row
                 binder.clicked.connect(lambda checked=False, name=action: start_capture(name))
-                if action in VIEW_AXIS_ACTIONS:
-                    invert = QtWidgets.QCheckBox("Invert")
-                    invert.setChecked(bool(view_invert.get(action, False)))
-                    form.addRow(f"{action} direction", invert)
-                    invert_checks[action] = invert
-                    invert_rows[action] = invert
 
         def start_capture(action):
             capture_action[0] = action
@@ -1710,14 +1816,32 @@ class QtApp:
             capture_timer.stop()
             return
         capture_timer.stop()
-        self.controller.mapping = {
+        saved_mapping = {
             action: selector.currentData() for action, selector in selectors.items()
         }
+        axis_aliases = {
+            "X+": "Position X+", "X-": "Position X-",
+            "Y+": "Position Y+", "Y-": "Position Y-",
+            "Z+": "Position Z+", "Z-": "Position Z-",
+            "Xa+": "Angle Xa+", "Xa-": "Angle Xa-",
+            "Ya+": "Angle Ya+", "Ya-": "Angle Ya-",
+            "Za+": "Angle Za+", "Za-": "Angle Za-",
+        }
+        for legacy_action, axis_action in axis_aliases.items():
+            control = saved_mapping.get(legacy_action)
+            if isinstance(control, str) and control.startswith("axis"):
+                saved_mapping[axis_action] = control
+        self.controller.mapping = saved_mapping
         self.controller.set_device(device.currentIndex())
         self.cfg.set("controller_mapping", self.controller.mapping)
         self.cfg.set("controller_device", self.controller.device_index)
         self.cfg.set("controller_view_invert", {
             action: check.isChecked() for action, check in invert_checks.items()
+            if action in VIEW_AXIS_ACTIONS
+        })
+        self.cfg.set("controller_axis_invert", {
+            action: check.isChecked() for action, check in invert_checks.items()
+            if action not in VIEW_AXIS_ACTIONS
         })
         self.cfg.save()
         self.controller_enabled_action.setChecked(True)
@@ -2184,11 +2308,19 @@ class QtApp:
         for key, label in (("verify_each", "Verify pose after each action"), ("step_plus_larger", "Step+ increases the step size"),
                            ("self_learn", "Learn from confident digit reads")):
             check = QtWidgets.QCheckBox(label); check.setChecked(bool(self.settings.get(key, True))); toggles[key] = check; form.addRow(check)
+        input_mode = QtWidgets.QComboBox()
+        input_mode.addItem("Plan target pose", "plan")
+        input_mode.addItem("Directly press panel buttons", "direct")
+        input_mode.setCurrentIndex(max(0, input_mode.findData(
+            self.settings.get("controller_input_mode", "plan"))))
+        form.addRow("Controller robot movement mode", input_mode)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject); form.addRow(buttons)
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             for key, spin in controls.items(): self.settings[key] = spin.value()
             for key, check in toggles.items(): self.settings[key] = check.isChecked()
+            self.settings["controller_input_mode"] = input_mode.currentData()
+            self.controller.set_repeat_delay(self.settings["controller_repeat_delay"])
             self.cfg.set("settings", self.settings); self.cfg.save()
             self.dirty = True
 
@@ -2624,7 +2756,7 @@ class QtApp:
         if not self.guided_plan:
             self._plan_movement()
         if not self.guided_plan: return
-        if self._current_pose() is None:
+        if self._current_pose() is None and not self.direct_controller_run:
             self.log("Cannot start the guide without a readable pose."); return
         if self.auto_input_check.isChecked():
             self._start_automated_move(); return
@@ -2881,7 +3013,9 @@ class QtApp:
             self.plan_label.setText(f"Automated action {self.guided_index + 1}/{len(self.guided_plan)}: clicking {action.btn.replace('-', '−')} — {action.label}")
             self.wayland_pointer.click(float(pos[0]), float(pos[1]))
             now = clock()
-            self.auto_next_allowed = now + self.click_interval.value()
+            interval = (self.settings.get("controller_repeat_delay", 0.12)
+                        if self.direct_controller_run else self.click_interval.value())
+            self.auto_next_allowed = now + interval
             self.auto_verify_deadline = now + max(self.click_interval.value(), self.settings["motion_wait"] + self.settings["settle"])
             QtCore.QTimer.singleShot(150, self._poll_auto_action)
         except Exception as exc:
@@ -2891,6 +3025,14 @@ class QtApp:
         if not self.automated_run or self.guided_index >= len(self.guided_plan): return
         action = self.guided_plan[self.guided_index]
         pose = self._current_pose()
+        if self.direct_controller_run:
+            self.guided_index += 1
+            if self.guided_index >= len(self.guided_plan):
+                self._finish_automated_move()
+            else:
+                wait_ms = max(0, round((self.auto_next_allowed - clock()) * 1000))
+                QtCore.QTimer.singleShot(wait_ms, self._auto_click_current)
+            return
         if not self._guided_action_verified(action, pose):
             if clock() < self.auto_verify_deadline:
                 QtCore.QTimer.singleShot(150, self._poll_auto_action)
@@ -2911,6 +3053,7 @@ class QtApp:
 
     def _finish_automated_move(self):
         self.automated_run = False
+        self.direct_controller_run = False
         if self.wayland_pointer: self.wayland_pointer.close()
         self.wayland_pointer = None
         self.guide_next.setEnabled(False); self.guide_stop.setEnabled(False); self.guide_start.setEnabled(False)
@@ -2919,6 +3062,7 @@ class QtApp:
 
     def _stop_automated_on_error(self, message):
         self.automated_run = False
+        self.direct_controller_run = False
         if self.wayland_pointer: self.wayland_pointer.close()
         self.wayland_pointer = None
         self.guide_next.setEnabled(True); self.guide_stop.setEnabled(True)
@@ -2927,6 +3071,7 @@ class QtApp:
 
     def _stop_guided_move(self):
         self.automated_run = False
+        self.direct_controller_run = False
         if self.wayland_pointer: self.wayland_pointer.close()
         self.wayland_pointer = None
         self.guided_plan = []; self.guided_index = 0; self.guided_before = None

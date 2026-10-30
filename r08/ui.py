@@ -562,7 +562,7 @@ class App:
         w = tk.Toplevel(self.root)
         w.title("Settings")
         w.configure(bg=C.panel)
-        w.resizable(False, False)
+        w.resizable(False, True)
         body = tk.Frame(w, bg=C.panel, padx=20, pady=16)
         body.pack()
         for r, (key, label, lo, hi, res) in enumerate(SETTING_DEFS):
