@@ -30,6 +30,8 @@ SPIKE_R, TIP_LEN, TIP_R = 0.006, 0.055, 0.0015
 SPIKE_BODY_LEN = 0.095
 SPIKE_BODY_W = 0.028
 SPIKE_BODY_H = 0.036
+ORIGIN_MARKER_RADIUS = 0.028
+ORIGIN_MARKER_HEIGHT = 0.012
 # FANUC's characteristic warm yellow, with separate enamel, joint, and cover
 # colors so the model reads as cast housings rather than one yellow silhouette.
 Y, YD, BK, GR, RD, TIPC = "#f5c900", "#d9a900", "#202329", "#646b73", C.rob_red, "#d9d2b0"
@@ -555,6 +557,23 @@ class RobotMesh:
             chunks.append(positions)
             normals.append(local_normals)
             colors.append(color)
+        # The red floor dot in the reference image marks the robot base
+        # origin, so keep it visible independently of the robot pose.
+        origin_marker = cyl_verts(
+            K.ROBOT_ORIGIN_M + np.array([0.0, 0.0, 0.002]),
+            K.ROBOT_ORIGIN_M + np.array([0.0, 0.0, ORIGIN_MARKER_HEIGHT]),
+            ORIGIN_MARKER_RADIUS,
+        )
+        marker_polys = [
+            [i, (i + 1) % SEG, SEG + (i + 1) % SEG, SEG + i]
+            for i in range(SEG)
+        ] + [list(range(SEG)), list(range(SEG, 2 * SEG))]
+        marker_positions, marker_normals, marker_colors = solid_soup(
+            origin_marker, marker_polys, hex_rgb(RD)
+        )
+        chunks.append(marker_positions)
+        normals.append(marker_normals)
+        colors.append(marker_colors)
         self.triangles_data = (
             np.concatenate(chunks),
             np.concatenate(normals),
@@ -688,7 +707,11 @@ def obj_summary(o):
 
 # ------------------------------------------------------------------ floor
 def floor_lines(extent=6.0, step=0.5, include_axes=True):
-    """-> (segments (N,2,3) float32, colours (N,3) 0..1).  Grid + coordinate axes at the base and at the WORLD origin."""
+    """-> (segments (N,2,3) float32, colours (N,3) 0..1).
+
+    Grid and coordinate axes use the robot base origin and the WORLD origin.
+    The active robot mesh also renders the base origin as a red reference dot.
+    """
     segs, cols = [], []
     minor, major = np.array([29, 33, 41]) / 255.0, np.array([46, 52, 66]) / 255.0
     n = int(extent / step)
@@ -699,7 +722,7 @@ def floor_lines(extent=6.0, step=0.5, include_axes=True):
         segs.append([(-extent, s, 0), (extent, s, 0)]); cols.append(c)
     if include_axes:
         axc = [(235, 90, 90), (90, 205, 120), (100, 160, 255)]
-        for org, ln in ((np.zeros(3), 0.55), (K.TABLE_ORIGIN_IN_BASE_M, 0.30)):
+        for org, ln in ((K.ROBOT_ORIGIN_M, 0.55), (K.TABLE_ORIGIN_IN_BASE_M, 0.30)):
             for k in range(3):
                 e = np.zeros(3)
                 e[k] = ln

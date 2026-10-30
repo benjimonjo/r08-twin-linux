@@ -33,7 +33,11 @@ from .planner import Press, plan_presses, step_value
 from .wayland_input import WaylandPointer
 from .github_updater import check_for_updates, install_update
 from .gpu_usage import GpuUsageMonitor
-from .controller import Controller, CONTROLLER_ACTIONS
+from .controller import (
+    Controller, CONTROLLER_ACTIONS, VIEW_MODIFIER, ANGLE_MODIFIER,
+    VIEW_AXIS_ACTIONS, VIEW_MAPPING_DEFAULTS, STICK_MAPPING_DEFAULTS,
+    ABORT_ACTION,
+)
 from .object_points import parse_xyz_points
 from types import SimpleNamespace
 
@@ -1114,6 +1118,7 @@ class QtApp:
         self.controller_status_action = controller_menu.addAction("Status: checking…")
         self.controller_status_action.setEnabled(False)
         controller_menu.addAction("Configure button mapping…", self._configure_controller)
+        controller_menu.addAction("Controller input readout…", self._controller_readout)
         helpb = QtWidgets.QPushButton("Help"); helpb.clicked.connect(self._help); header.addWidget(helpb)
         settingsb = QtWidgets.QPushButton("Settings"); settingsb.clicked.connect(self._settings); header.addWidget(settingsb)
         debugb = QtWidgets.QPushButton("Debug"); debugb.clicked.connect(self._toggle_debug); header.addWidget(debugb)
@@ -1542,6 +1547,28 @@ class QtApp:
         self.cfg.save()
 
     def _controller_action(self, action, magnitude=1.0):
+        if action.startswith(f"{VIEW_MODIFIER}:"):
+            _, view_action, direction = action.split(":")
+            view_axes = {
+                VIEW_AXIS_ACTIONS[0]: (0, 1),
+                VIEW_AXIS_ACTIONS[1]: (1, -1),
+                VIEW_AXIS_ACTIONS[2]: (2, 1),
+                VIEW_AXIS_ACTIONS[3]: (3, -1),
+            }
+            axis, view_direction = view_axes.get(view_action, (-1, 0))
+            invert = bool(self.cfg.get("controller_view_invert", {}).get(view_action, False))
+            sign = 1 if direction == "+" else -1
+            amount = view_direction * sign * (-(1 if invert else 1)) * max(0.0, min(1.0, magnitude)) * 8.0
+            if axis == 0:
+                self.cam.orbit(amount, 0)
+            elif axis == 1:
+                self.cam.orbit(0, -amount)
+            elif axis == 2:
+                self.cam.pan(amount, 0, max(1, self.image_label.height()))
+            elif axis == 3:
+                self.cam.pan(0, -amount, max(1, self.image_label.height()))
+            self.dirty = True
+            return
         if action == "Step+":
             if magnitude >= 0.5:
                 self.step_combo.setCurrentIndex(min(self.step_combo.count() - 1, self.step_combo.currentIndex() + 1))
@@ -1549,6 +1576,9 @@ class QtApp:
         if action == "Step-":
             if magnitude >= 0.5:
                 self.step_combo.setCurrentIndex(max(0, self.step_combo.currentIndex() - 1))
+            return
+        if action == ABORT_ACTION:
+            self._panel_camera_action(ABORT_ACTION)
             return
         if action in CONTROLLER_ACTIONS[:12]:
             axis = CONTROLLER_ACTIONS[:12].index(action) // 2
@@ -1570,9 +1600,20 @@ class QtApp:
         layout.addWidget(device)
         form = QtWidgets.QFormLayout(); layout.addLayout(form)
         mapping = dict(self.controller.mapping)
+        mapping.setdefault(ANGLE_MODIFIER, 4)
+        mapping.setdefault(VIEW_MODIFIER, 5)
+        mapping.update({key: VIEW_MAPPING_DEFAULTS[key] for key in VIEW_AXIS_ACTIONS
+                        if key not in mapping})
         selectors = {}
         binders = {}
         rows = {}
+        invert_rows = {}
+        mapping_actions = (
+            CONTROLLER_ACTIONS + (ABORT_ACTION, VIEW_MODIFIER, ANGLE_MODIFIER)
+            + tuple(dict.fromkeys(VIEW_AXIS_ACTIONS + tuple(STICK_MAPPING_DEFAULTS)))
+        )
+        invert_checks = {}
+        view_invert = dict(self.cfg.get("controller_view_invert", {}))
         capture_timer = QtCore.QTimer(dialog)
         capture_timer.setInterval(50)
         capture_action = [None]
@@ -1583,9 +1624,13 @@ class QtApp:
         def rebuild_buttons(index):
             for row in rows.values():
                 form.removeRow(row)
+            for row in invert_rows.values():
+                form.removeRow(row)
             selectors.clear()
             binders.clear()
             rows.clear()
+            invert_rows.clear()
+            invert_checks.clear()
             options = Controller.button_options(index)
             if not options:
                 options = [
@@ -1597,7 +1642,9 @@ class QtApp:
                         ("left", "Left"), ("right", "Right")
                     )
                 ]
-            for action in CONTROLLER_ACTIONS:
+            if not any(value is None for value, _ in options):
+                options.insert(0, (None, "Unassigned"))
+            for action in mapping_actions:
                 selector = QtWidgets.QComboBox()
                 for button, label in options:
                     selector.addItem(label, button)
@@ -1615,6 +1662,12 @@ class QtApp:
                 binders[action] = binder
                 rows[action] = row
                 binder.clicked.connect(lambda checked=False, name=action: start_capture(name))
+                if action in VIEW_AXIS_ACTIONS:
+                    invert = QtWidgets.QCheckBox("Invert")
+                    invert.setChecked(bool(view_invert.get(action, False)))
+                    form.addRow(f"{action} direction", invert)
+                    invert_checks[action] = invert
+                    invert_rows[action] = invert
 
         def start_capture(action):
             capture_action[0] = action
@@ -1663,9 +1716,66 @@ class QtApp:
         self.controller.set_device(device.currentIndex())
         self.cfg.set("controller_mapping", self.controller.mapping)
         self.cfg.set("controller_device", self.controller.device_index)
+        self.cfg.set("controller_view_invert", {
+            action: check.isChecked() for action, check in invert_checks.items()
+        })
         self.cfg.save()
         self.controller_enabled_action.setChecked(True)
         self.log("Controller mapping saved.")
+
+    def _controller_readout(self):
+        self.controller_readout_open = True
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle("Controller input readout")
+        dialog.resize(620, 480)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        name = QtWidgets.QLabel()
+        layout.addWidget(name)
+        buttons_box = QtWidgets.QGroupBox("Buttons and D-pad")
+        buttons_layout = QtWidgets.QGridLayout(buttons_box)
+        button_labels = []
+        options = Controller.button_options(self.controller.device_index)
+        for control, label in options:
+            if isinstance(control, int):
+                item = QtWidgets.QLabel(label)
+                item.setMinimumWidth(140)
+                buttons_layout.addWidget(item, len(button_labels) // 4, len(button_labels) % 4)
+                button_labels.append((control, item))
+        hat_label = QtWidgets.QLabel()
+        buttons_layout.addWidget(hat_label, (len(button_labels) + 3) // 4, 0, 1, 4)
+        layout.addWidget(buttons_box)
+        axes_box = QtWidgets.QGroupBox("Joysticks / axes")
+        axes_layout = QtWidgets.QFormLayout(axes_box)
+        axis_bars = []
+        axis_count = len(self.controller.state().get("axes", []))
+        for axis in range(axis_count):
+            bar = QtWidgets.QProgressBar()
+            bar.setRange(-100, 100)
+            bar.setValue(0)
+            bar.setFormat("%v")
+            axes_layout.addRow(f"Axis {axis}", bar)
+            axis_bars.append(bar)
+        layout.addWidget(axes_box)
+        close = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject); close.accepted.connect(dialog.accept)
+        layout.addWidget(close)
+        timer = QtCore.QTimer(dialog)
+
+        def update():
+            state = self.controller.state()
+            name.setText(f"Controller: {state['name']}")
+            for button, label in button_labels:
+                label.setText(f"{label.text().split('  ')[0]}  {'PRESSED' if state['buttons'][button] else 'released'}")
+            hat = state["hat"]
+            hat_label.setText(f"D-pad: x={hat[0]}, y={hat[1]}")
+            for axis, bar in enumerate(axis_bars):
+                bar.setValue(round(state["axes"][axis] * 100))
+
+        timer.timeout.connect(update)
+        timer.start(50)
+        update()
+        dialog.exec()
+        self.controller_readout_open = False
 
     def _set_gpu_renderer(self, enabled):
         enabled = bool(enabled)
@@ -3300,8 +3410,15 @@ class QtApp:
     def _tick(self):
         now = clock(); dt = min(0.1, now - self.last_tick); self.last_tick = now
         if self.settings.get("controller_enabled", False):
-            for action, magnitude in self.controller.poll():
+            controller_actions = self.controller.poll()
+            for action, magnitude in controller_actions:
                 self._controller_action(action, magnitude)
+            status = self.controller.error or (
+                self.controller.joystick.get_name() if self.controller.joystick else "No controller detected")
+            self.controller_status_action.setText(f"Status: {status}")
+        elif getattr(self, "controller_readout_open", False):
+            self.controller.poll()
+        if getattr(self, "controller_readout_open", False):
             status = self.controller.error or (
                 self.controller.joystick.get_name() if self.controller.joystick else "No controller detected")
             self.controller_status_action.setText(f"Status: {status}")

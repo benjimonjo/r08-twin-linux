@@ -70,6 +70,7 @@ JOINT_LIMITS_DEG = np.array([item["range_deg"] for item in _MODEL_DATA["joint_li
 JOINT_LIMITS_RAD = np.radians(JOINT_LIMITS_DEG)
 
 POSITION_UNIT_TO_METERS = 0.0254
+ROBOT_ORIGIN_M = np.zeros(3)
 TABLE_ORIGIN_IN_BASE_M = np.array([0.0, 0.0, J2_HEIGHT])
 TABLE_FRAME_TO_ROBOT_R = np.eye(3)
 TOOL_FRAME_Y_DEG = 90.0

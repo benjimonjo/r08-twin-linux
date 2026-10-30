@@ -12,6 +12,31 @@ CONTROLLER_ACTIONS = (
     "Xa+", "Xa-", "Ya+", "Ya-", "Za+", "Za-",
     "Step+", "Step-",
 )
+ABORT_ACTION = "Abort"
+VIEW_MODIFIER = "View modifier"
+CAMERA_MODIFIER = VIEW_MODIFIER
+ANGLE_MODIFIER = "Angle modifier"
+VIEW_AXIS_ACTIONS = (
+    "View orbit horizontal", "View orbit vertical",
+    "View pan horizontal", "View pan vertical",
+)
+VIEW_MAPPING_DEFAULTS = {
+    "View orbit horizontal": "axis0:+",
+    "View orbit vertical": "axis1:+",
+    "View pan horizontal": "axis2:+",
+    "View pan vertical": "axis3:+",
+}
+STICK_MAPPING_DEFAULTS = {
+    "Position X+": "axis0:+", "Position X-": "axis0:-",
+    "Position Y+": "axis1:-", "Position Y-": "axis1:+",
+    "Position Z+": "axis3:-", "Position Z-": "axis3:+",
+    "Angle Xa+": "axis0:+", "Angle Xa-": "axis0:-",
+    "Angle Ya+": "axis1:-", "Angle Ya-": "axis1:+",
+    "Angle Za+": "axis3:-", "Angle Za-": "axis3:+",
+    "View orbit horizontal": "axis0:+", "View orbit vertical": "axis1:+",
+    "View pan horizontal": "axis2:+", "View pan vertical": "axis3:+",
+}
+MODIFIER_MAPPING_DEFAULTS = {ANGLE_MODIFIER: 4, CAMERA_MODIFIER: 5}
 DEFAULT_MAPPING = {action: index for index, action in enumerate(CONTROLLER_ACTIONS)}
 AXIS_DEADZONE = 0.55
 
@@ -20,6 +45,13 @@ class Controller:
     def __init__(self, mapping=None, device=0):
         self.mapping = dict(DEFAULT_MAPPING)
         self.mapping.update(mapping or {})
+        for action, control in VIEW_MAPPING_DEFAULTS.items():
+            self.mapping.setdefault(action, control)
+        for action, control in STICK_MAPPING_DEFAULTS.items():
+            self.mapping.setdefault(action, control)
+        for action, control in MODIFIER_MAPPING_DEFAULTS.items():
+            self.mapping.setdefault(action, control)
+        self.mapping.setdefault(ABORT_ACTION, None)
         self.device_index = int(device)
         self.joystick = None
         self.error = None
@@ -94,7 +126,7 @@ class Controller:
                 for axis in range(joystick.get_numaxes())
                 for sign in ("+", "-")
             )
-            return options
+            return [(None, "Unassigned")] + options
         except Exception:
             return []
 
@@ -147,6 +179,7 @@ class Controller:
             return []
         now = time.monotonic()
         out = []
+        pressed_buttons = set()
         try:
             pygame.event.pump()
             for event in pygame.event.get():
@@ -154,6 +187,7 @@ class Controller:
                     continue
                 if event.type == pygame.JOYBUTTONDOWN:
                     self._held_buttons.add(event.button)
+                    pressed_buttons.add(event.button)
                 elif event.type == pygame.JOYBUTTONUP:
                     self._held_buttons.discard(event.button)
                 elif event.type == pygame.JOYHATMOTION and event.hat == 0:
@@ -175,7 +209,37 @@ class Controller:
                             out.append((action, 1.0))
                 self._next_button_repeat = now + 0.12
 
-            for action, control in self.mapping.items():
+            if self.mapping.get(ABORT_ACTION) in pressed_buttons:
+                out.append((ABORT_ACTION, 1.0))
+
+            def held(control):
+                if control in self._held_buttons:
+                    return True
+                if isinstance(control, str) and control.startswith("hat0:"):
+                    return {
+                        "left": self._hat_value[0] < 0, "right": self._hat_value[0] > 0,
+                        "up": self._hat_value[1] > 0, "down": self._hat_value[1] < 0,
+                    }.get(control.removeprefix("hat0:"), False)
+                return False
+
+            camera_held = held(self.mapping.get(CAMERA_MODIFIER))
+            angle_held = held(self.mapping.get(ANGLE_MODIFIER))
+            if camera_held:
+                mappings = {action: self.mapping.get(action) for action in (
+                    "View orbit horizontal", "View orbit vertical",
+                    "View pan horizontal", "View pan vertical",
+                )}
+            elif angle_held:
+                mappings = {action: self.mapping.get(action) for action in (
+                    "Angle Xa+", "Angle Xa-", "Angle Ya+", "Angle Ya-",
+                    "Angle Za+", "Angle Za-",
+                )}
+            else:
+                mappings = {action: self.mapping.get(action) for action in (
+                    "Position X+", "Position X-", "Position Y+", "Position Y-",
+                    "Position Z+", "Position Z-",
+                )}
+            for action, control in mappings.items():
                 if not (isinstance(control, str) and control.startswith("axis")):
                     continue
                 try:
@@ -183,12 +247,38 @@ class Controller:
                     value = float(self._axis_values.get(int(axis), 0.0))
                 except (TypeError, ValueError):
                     continue
-                if (sign == "+" and value >= AXIS_DEADZONE) or (sign == "-" and value <= -AXIS_DEADZONE):
-                    magnitude = (abs(value) - AXIS_DEADZONE) / (1.0 - AXIS_DEADZONE)
-                    out.append((action, max(0.0, min(1.0, magnitude))))
+                if abs(value) < AXIS_DEADZONE:
+                    continue
+                oriented_value = value if sign == "+" else -value
+                direction = "+" if oriented_value > 0 else "-"
+                magnitude = (abs(oriented_value) - AXIS_DEADZONE) / (1.0 - AXIS_DEADZONE)
+                if camera_held:
+                    output_action = f"{VIEW_MODIFIER}:{action}:{direction}"
+                else:
+                    output_action = action
+                output_action = {
+                    "Position X+": "X+", "Position X-": "X-",
+                    "Position Y+": "Y+", "Position Y-": "Y-",
+                    "Position Z+": "Z+", "Position Z-": "Z-",
+                    "Angle Xa+": "Xa+", "Angle Xa-": "Xa-",
+                    "Angle Ya+": "Ya+", "Angle Ya-": "Ya-",
+                    "Angle Za+": "Za+", "Angle Za-": "Za-",
+                }.get(output_action, output_action)
+                out.append((output_action, max(0.0, min(1.0, magnitude))))
         except Exception as exc:
             self.error = str(exc)
         return out
+
+    def state(self):
+        """Return a snapshot for the controller diagnostics readout."""
+        if self.joystick is None:
+            return {"name": self.error or "No controller detected", "buttons": [], "axes": [], "hat": (0, 0)}
+        return {
+            "name": self.joystick.get_name(),
+            "buttons": [i in self._held_buttons for i in range(self.joystick.get_numbuttons())],
+            "axes": [float(self._axis_values.get(i, 0.0)) for i in range(self.joystick.get_numaxes())],
+            "hat": tuple(self._hat_value),
+        }
 
     def close(self):
         if pygame is not None:

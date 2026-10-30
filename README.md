@@ -111,6 +111,14 @@ Joystick axes are also available, and each mapping row has a **Bind** button:
 click it and press the desired controller button, D-pad direction, or move the
 desired joystick direction. Holding a mapped button or D-pad direction repeats
 the jog, while joystick movement is proportional to stick deflection.
+The controller mapping follows the PS5/Xbox layout by default: the sticks jog
+position, holding the **Angle modifier** switches them to Xa/Ya/Za, and holding
+the **View modifier** switches them to 3D orbit/pan. All modifier buttons and
+stick axes can be remapped and the camera axes inverted independently.
+**Controller input readout** shows every detected button, D-pad state, and
+joystick axis value live.
+The **Abort** action can also be assigned with **Bind**; it triggers once when
+the selected control is pressed and does not repeat while held.
 Controller input changes the target pose; it does not click the Discord
 movement panel automatically.
 
