@@ -180,6 +180,7 @@ fi
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
 "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt"
+"$INSTALL_DIR/.venv/bin/python" -m playwright install chromium
 
 mkdir -p "$BIN_DIR" "$DESKTOP_DIR"
 cat > "$BIN_DIR/r08-twin" <<EOF

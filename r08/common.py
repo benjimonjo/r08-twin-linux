@@ -78,6 +78,7 @@ DEFAULT_SETTINGS = {
     "show_backend": True,     # show the renderer name in the 3D view
     "controller_enabled": False,
     "controller_input_mode": "plan",
+    "direct_panel_transport": "browser",
     "controller_axis_invert": {},
     "controller_repeat_delay": 0.12,  # seconds between held-button/D-pad repeats
 }

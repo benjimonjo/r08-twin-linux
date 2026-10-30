@@ -124,6 +124,14 @@ The held-button/D-pad repeat delay is configurable in **Settings** or under
 input mode** switches between planning a target pose and direct mode. Direct
 mode repeatedly clicks the calibrated robot-panel buttons and requires
 **Automated input (Wayland portal)** plus panel calibration.
+Direct mode can use **Discord browser (Option B)** instead of pointer
+automation. This opens a persistent Chromium profile, uses the real Discord
+button UI after you log in manually, and does not require a Discord token.
+The installer installs Playwright and its Chromium browser automatically.
+For a manual virtual-environment install, run `pip install playwright &&
+playwright install chromium`; choose the transport under **Controller → Set
+controller input mode**. Browser mode is always visible (headless mode is not
+used).
 
 ### 3. Start the application
 

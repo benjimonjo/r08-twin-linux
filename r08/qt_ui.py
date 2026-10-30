@@ -38,6 +38,10 @@ from .controller import (
     VIEW_AXIS_ACTIONS, VIEW_MAPPING_DEFAULTS, STICK_MAPPING_DEFAULTS,
     ABORT_ACTION,
 )
+try:
+    from .discord_browser import BrowserPanel
+except Exception:
+    BrowserPanel = None
 from .object_points import parse_xyz_points
 from types import SimpleNamespace
 
@@ -1028,6 +1032,7 @@ class QtApp:
         self.portal_signals = PortalSignals(); self.portal_signals.ready.connect(self._on_input_ready)
         self.wayland_pointer = None; self.automated_run = False
         self.direct_controller_run = False
+        self.browser_panel = None
         self.auto_next_allowed = 0.0; self.auto_verify_deadline = 0.0
         self.update_worker = None
         self.workspace_worker = None
@@ -1061,7 +1066,10 @@ class QtApp:
         if self.startup_capture_started or self.capture_init_worker is not None:
             return
         self.startup_capture_started = True
-        self.log("Preparing startup capture: main R08 stream first, movement-controls stream second.")
+        browser_transport = self.settings.get("direct_panel_transport", "browser") == "browser"
+        self.log("Preparing startup capture: main R08 stream first." +
+                 (" Browser direct mode does not need a movement-controls capture."
+                  if browser_transport else " Movement-controls stream follows."))
         if self.capture is None:
             source = self.capture_source
             detail = ("Choose the window containing the number table and camera stream."
@@ -1080,8 +1088,11 @@ class QtApp:
             self.capture_init_worker.start()
             self.log("Opening the main screen-share chooser. Select the number table and camera stream…")
             return
-        self.log("Main R08 capture already active; continuing to movement-controls capture.")
-        self._start_startup_button_capture()
+        self.log("Main R08 capture already active.")
+        if self.settings.get("controller_input_mode") == "direct" and browser_transport:
+            self._start_direct_controller_session()
+        elif not browser_transport:
+            self._start_startup_button_capture()
 
     def _start_startup_button_capture(self):
         if self.button_capture is not None:
@@ -1594,9 +1605,16 @@ class QtApp:
         current = self.settings.get("controller_input_mode", "plan")
         mode.setCurrentIndex(max(0, mode.findData(current)))
         form.addRow("Robot movement mode:", mode)
+        transport = QtWidgets.QComboBox()
+        transport.addItem("Wayland pointer", "pointer")
+        transport.addItem("Discord browser (Option B)", "browser")
+        transport.setCurrentIndex(max(0, transport.findData(
+            self.settings.get("direct_panel_transport", "browser"))))
+        form.addRow("Direct panel transport:", transport)
         hint = QtWidgets.QLabel(
-            "Direct mode repeatedly clicks the calibrated robot-panel buttons while "
-            "a controller direction is held. Automated input and panel calibration are required.")
+            "Direct mode sends mapped panel actions while a controller direction is held. "
+            "Wayland pointer transport requires calibration; Discord browser transport "
+            "uses a persistent Chromium profile and requires a manual Discord login.")
         hint.setWordWrap(True)
         form.addRow(hint)
         buttons = QtWidgets.QDialogButtonBox(
@@ -1608,11 +1626,15 @@ class QtApp:
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             selected_mode = mode.currentData()
             previous_mode = self.settings.get("controller_input_mode", "plan")
+            previous_transport = self.settings.get("direct_panel_transport", "browser")
             self.settings["controller_input_mode"] = selected_mode
+            self.settings["direct_panel_transport"] = transport.currentData()
             self.cfg.set("settings", self.settings)
             self.cfg.save()
             self.log(f"Controller input mode set to {mode.currentText()}.")
             if selected_mode == "direct":
+                if previous_mode == "direct" and previous_transport != transport.currentData():
+                    self._stop_direct_controller_session()
                 self._start_direct_controller_session()
             elif previous_mode == "direct":
                 self._stop_direct_controller_session()
@@ -1669,6 +1691,9 @@ class QtApp:
                 self.step_combo.setCurrentIndex(max(0, self.step_combo.currentIndex() - 1))
             return
         if action == ABORT_ACTION:
+            if self.browser_panel is not None:
+                self.browser_panel.abort()
+                return
             self._panel_camera_action(ABORT_ACTION)
             return
         if action in CONTROLLER_ACTIONS[:12]:
@@ -1680,8 +1705,18 @@ class QtApp:
             self._jog_target(axis, sign, magnitude=magnitude)
 
     def _direct_controller_press(self, action):
-        if not self.cfg.get("auto_input", False):
+        browser_transport = self.settings.get("direct_panel_transport", "browser") == "browser"
+        if not browser_transport and not self.cfg.get("auto_input", False):
             self.log("Direct controller mode requires Automated input to be enabled.")
+            return
+        if self.settings.get("direct_panel_transport", "browser") == "browser":
+            if self.browser_panel is None:
+                self.log("Browser panel is not ready yet; enable direct mode and log in to Discord.")
+                return
+            try:
+                self.browser_panel.press(action)
+            except Exception as exc:
+                self.log(f"Browser panel press failed for {action}: {exc}")
             return
         press = Press(btn=action, kind="controller", verifiable=False, label=f"controller: {action}")
         if self.direct_controller_run:
@@ -1699,8 +1734,22 @@ class QtApp:
         if not self.settings.get("controller_enabled", False):
             self.log("Enable the controller before starting direct mode.")
             return
-        if not self.cfg.get("auto_input", False):
+        browser_transport = self.settings.get("direct_panel_transport", "browser") == "browser"
+        if not browser_transport and not self.cfg.get("auto_input", False):
             self.log("Direct controller mode requires Automated input to be enabled.")
+            return
+        if self.settings.get("direct_panel_transport", "browser") == "browser":
+            if BrowserPanel is None:
+                self.log("Browser direct mode requires Playwright. Install it and Chromium first.")
+                return
+            if self.browser_panel is None:
+                try:
+                    self.browser_panel = BrowserPanel()
+                    self.log("Browser panel opened. Log in to Discord and open the robot control channel.")
+                except Exception as exc:
+                    self.browser_panel = None
+                    self.log(f"Could not open browser panel: {exc}")
+            self.direct_controller_run = True
             return
         if self.automated_run or (self.capture_init_worker and self.capture_init_worker.isRunning()):
             return
@@ -1710,6 +1759,9 @@ class QtApp:
         self._start_automated_move()
 
     def _stop_direct_controller_session(self):
+        if self.browser_panel is not None:
+            self.browser_panel.close()
+            self.browser_panel = None
         if self.direct_controller_run or self.automated_run:
             self._stop_guided_move()
 
@@ -3519,7 +3571,11 @@ class QtApp:
             self._save_capture_restore_token(result, False)
         if purpose == "startup_stream":
             self.log("Main R08 capture ready.")
-            self._start_startup_button_capture()
+            if (self.settings.get("direct_panel_transport", "browser") == "browser"
+                    and self.settings.get("controller_input_mode") == "direct"):
+                self._start_direct_controller_session()
+            elif self.settings.get("direct_panel_transport", "browser") != "browser":
+                self._start_startup_button_capture()
             return
         if purpose == "startup_button":
             self.log("Movement-controls capture ready.")
@@ -3765,6 +3821,7 @@ class QtApp:
         self.image_label.setPixmap(QtGui.QPixmap.fromImage(qimg))
 
     def _close_event(self, event):
+        self._stop_direct_controller_session()
         portal_workers = [self.capture_init_worker, getattr(self, "button_recognition_worker", None)]
         active_workers = [worker for worker in portal_workers if worker is not None and worker.isRunning()]
         if active_workers and not self._interrupt_requested:
