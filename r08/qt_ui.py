@@ -1552,6 +1552,10 @@ class QtApp:
         self.settings["controller_enabled"] = bool(enabled)
         self.cfg.set("settings", self.settings)
         self.cfg.save()
+        if not enabled:
+            self._stop_direct_controller_session()
+        elif self.settings.get("controller_input_mode") == "direct":
+            self._start_direct_controller_session()
 
     def _controller_repeat_delay_dialog(self):
         dialog = QtWidgets.QDialog(self.window)
@@ -1602,10 +1606,16 @@ class QtApp:
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            self.settings["controller_input_mode"] = mode.currentData()
+            selected_mode = mode.currentData()
+            previous_mode = self.settings.get("controller_input_mode", "plan")
+            self.settings["controller_input_mode"] = selected_mode
             self.cfg.set("settings", self.settings)
             self.cfg.save()
             self.log(f"Controller input mode set to {mode.currentText()}.")
+            if selected_mode == "direct":
+                self._start_direct_controller_session()
+            elif previous_mode == "direct":
+                self._stop_direct_controller_session()
 
     def _controller_action(self, action, magnitude=1.0):
         if action.startswith(f"{VIEW_MODIFIER}:"):
@@ -1676,11 +1686,32 @@ class QtApp:
         press = Press(btn=action, kind="controller", verifiable=False, label=f"controller: {action}")
         if self.direct_controller_run:
             self.guided_plan.append(press)
+            if self.automated_run and self.wayland_pointer and len(self.guided_plan) == 1:
+                self.guided_index = 0
+                self._auto_click_current()
             return
         self.direct_controller_run = True
         self.guided_plan = [press]
         self.guided_index = 0
         self._start_guided_move()
+
+    def _start_direct_controller_session(self):
+        if not self.settings.get("controller_enabled", False):
+            self.log("Enable the controller before starting direct mode.")
+            return
+        if not self.cfg.get("auto_input", False):
+            self.log("Direct controller mode requires Automated input to be enabled.")
+            return
+        if self.automated_run or (self.capture_init_worker and self.capture_init_worker.isRunning()):
+            return
+        self.direct_controller_run = True
+        self.guided_plan = []
+        self.guided_index = 0
+        self._start_automated_move()
+
+    def _stop_direct_controller_session(self):
+        if self.direct_controller_run or self.automated_run:
+            self._stop_guided_move()
 
     def _configure_controller(self):
         names = Controller.available()
@@ -2294,6 +2325,10 @@ class QtApp:
     def _auto_input_changed(self, enabled):
         self.cfg.set("auto_input", bool(enabled)); self.cfg.save()
         self.control_label.setText("Automated input is enabled as an option; each run asks you to confirm and KDE must grant pointer access." if enabled else "Guided panel moves are available in manual-confirm mode. The app cannot click the robot panel through Wayland unless automated input is enabled and granted.")
+        if enabled and self.settings.get("controller_input_mode") == "direct":
+            self._start_direct_controller_session()
+        elif not enabled:
+            self._stop_direct_controller_session()
 
     def _save_click_interval(self, value):
         self.cfg.set("click_interval", float(value)); self.cfg.save()
@@ -2837,6 +2872,8 @@ class QtApp:
         return dialog
 
     def _start_automated_move(self):
+        if self.automated_run or (self.capture_init_worker and self.capture_init_worker.isRunning()):
+            return
         buttons = self.cfg.get("buttons", {}) or {}
         window_source = self.cfg.get("button_capture_source", "monitor") == "window"
         if not self.cfg.get("button_panel"):
@@ -2893,13 +2930,14 @@ class QtApp:
             self.log("Select the monitor containing the movement-control window so R08 can locate it for pointer input…" if window_source else
                      "Select the monitor containing that window so R08 can map its controls to desktop clicks…")
             return
-        answer = QtWidgets.QMessageBox.warning(
-            self.window, "Automated robot panel input",
-            f"R08 will move the pointer and click the calibrated robot panel buttons, every {self.click_interval.value():g} seconds. "
-            "This can move the robot. Make sure the work area is clear and the robot is safe to move. Keep this window visible so you can stop the sequence. KDE will ask you to grant pointer access.",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
-            QtWidgets.QMessageBox.StandardButton.Cancel)
-        if answer != QtWidgets.QMessageBox.StandardButton.Yes: return
+        if not self.direct_controller_run:
+            answer = QtWidgets.QMessageBox.warning(
+                self.window, "Automated robot panel input",
+                f"R08 will move the pointer and click the calibrated robot panel buttons, every {self.click_interval.value():g} seconds. "
+                "This can move the robot. Make sure the work area is clear and the robot is safe to move. Keep this window visible so you can stop the sequence. KDE will ask you to grant pointer access.",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
+                QtWidgets.QMessageBox.StandardButton.Cancel)
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes: return
         try:
             capture = self.pointer_capture if window_source else self.button_capture
             monitors = list(capture.monitors[1:] or capture.monitors)
@@ -2957,7 +2995,9 @@ class QtApp:
                     pass
                 self.pointer_capture = None
             QtWidgets.QMessageBox.critical(self.window, "Automated input", message); return
-        self.guided_index = 0; self.guided_before = self._current_pose().copy()
+        self.guided_index = 0
+        pose = self._current_pose()
+        self.guided_before = None if pose is None else pose.copy()
         self.automated_run = True
         self.guide_start.setEnabled(False); self.guide_next.setEnabled(False); self.guide_stop.setEnabled(True)
         self.plan_label.setText("Requesting KDE RemoteDesktop pointer permission… Approve the portal prompt to continue.")
@@ -2973,6 +3013,7 @@ class QtApp:
             self.wayland_pointer = None; return
         if not ok:
             self.automated_run = False; self.wayland_pointer = None
+            self.direct_controller_run = False
             self.guide_start.setEnabled(True); self.guide_next.setEnabled(False); self.guide_stop.setEnabled(False)
             self.plan_label.setText("Automated input could not start. Use manual guidance or check KDE portal support.")
             QtWidgets.QMessageBox.warning(self.window, "Automated input unavailable", message)
@@ -2983,6 +3024,10 @@ class QtApp:
     def _auto_click_current(self):
         if not self.automated_run or not self.wayland_pointer: return
         if self.guided_index >= len(self.guided_plan):
+            if self.direct_controller_run:
+                self.guided_plan = []
+                self.guided_index = 0
+                return
             self._finish_automated_move(); return
         action = self.guided_plan[self.guided_index]
         pos = (self.cfg.get("buttons", {}) or {}).get(action.btn)
@@ -3028,7 +3073,8 @@ class QtApp:
         if self.direct_controller_run:
             self.guided_index += 1
             if self.guided_index >= len(self.guided_plan):
-                self._finish_automated_move()
+                self.guided_plan = []
+                self.guided_index = 0
             else:
                 wait_ms = max(0, round((self.auto_next_allowed - clock()) * 1000))
                 QtCore.QTimer.singleShot(wait_ms, self._auto_click_current)
