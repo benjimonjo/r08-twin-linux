@@ -101,6 +101,18 @@ python -m pip install -r requirements.txt
 
 The requirements include the Qt, OCR, capture, input, and rendering packages.
 `moderngl` is optional at runtime; without it, R08 uses the CPU renderer.
+`pygame` is optional and enables the **Controller** menu. Connect a game
+controller, open **Controller → Configure button mapping**, and choose the
+named buttons for the six position and six angle directions plus Step+/Step−.
+For recognized PlayStation controllers, for example, the menu shows names such
+as `Triangle`, `Square`, `Circle`, and `Cross` together with their SDL button
+numbers, as well as `D-pad Up`, `D-pad Down`, `D-pad Left`, and `D-pad Right`.
+Joystick axes are also available, and each mapping row has a **Bind** button:
+click it and press the desired controller button, D-pad direction, or move the
+desired joystick direction. Holding a mapped button or D-pad direction repeats
+the jog, while joystick movement is proportional to stick deflection.
+Controller input changes the target pose; it does not click the Discord
+movement panel automatically.
 
 ### 3. Start the application
 

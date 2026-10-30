@@ -7,3 +7,4 @@ moderngl      # optional: GPU 3D view (falls back to CPU drawing without it)
 pytesseract   # optional: only for the 'Step size' text; digits no longer need Tesseract
 PySide6       # native Wayland UI on Linux Wayland sessions
 pynvml        # optional: application-level NVIDIA GPU utilization
+pygame        # optional: controller mapping and button input

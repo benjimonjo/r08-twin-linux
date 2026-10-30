@@ -27,6 +27,9 @@ PRISM_FACES = [[0, 1, 2, 3], [4, 7, 6, 5], [0, 4, 5, 1], [1, 5, 6, 2], [2, 6, 7,
 
 PLATE_W, PLATE_T = 0.24, 0.05
 SPIKE_R, TIP_LEN, TIP_R = 0.006, 0.055, 0.0015
+SPIKE_BODY_LEN = 0.095
+SPIKE_BODY_W = 0.028
+SPIKE_BODY_H = 0.036
 # FANUC's characteristic warm yellow, with separate enamel, joint, and cover
 # colors so the model reads as cast housings rather than one yellow silhouette.
 Y, YD, BK, GR, RD, TIPC = "#f5c900", "#d9a900", "#202329", "#646b73", C.rob_red, "#d9d2b0"
@@ -520,11 +523,33 @@ class RobotMesh:
         for length_in, offset_in in K.SPIKES_IN:
             center = fl + lateral * offset_in * IN
             end = center + axis * length_in * IN
+            body_start = center + axis * 0.016
+            body_end = body_start + axis * min(
+                SPIKE_BODY_LEN, max(0.0, length_in * IN - 0.025)
+            )
+            # The photographed probe has a broad painted sleeve at the
+            # flange, then a narrow metal shaft with a tapered working tip.
             tool_parts.append(solid_soup(
-                cyl_verts(center + axis * 0.016, end, SPIKE_R, TIP_R),
+                box_verts(
+                    body_start, body_end, lateral, thickness,
+                    SPIKE_BODY_W, SPIKE_BODY_H,
+                    SPIKE_BODY_W * 0.78, SPIKE_BODY_H * 0.78,
+                ),
+                PRISM_FACES,
+                hex_rgb(Y),
+            ))
+            shaft_end = end - axis * TIP_LEN
+            tool_parts.append(solid_soup(
+                cyl_verts(body_end, shaft_end, SPIKE_R * 0.72, SPIKE_R * 0.60),
                 [[i, (i + 1) % SEG, SEG + (i + 1) % SEG, SEG + i]
                  for i in range(SEG)] + [list(range(SEG)), list(range(SEG, 2 * SEG))],
-                hex_rgb(Y),
+                hex_rgb(METAL),
+            ))
+            tool_parts.append(solid_soup(
+                cyl_verts(shaft_end, end, SPIKE_R * 0.60, TIP_R),
+                [[i, (i + 1) % SEG, SEG + (i + 1) % SEG, SEG + i]
+                 for i in range(SEG)] + [list(range(SEG)), list(range(SEG, 2 * SEG))],
+                hex_rgb(TIPC),
             ))
         for positions, local_normals, color in tool_parts:
             chunks.append(positions)

@@ -76,6 +76,7 @@ DEFAULT_SETTINGS = {
     "show_axes": True,        # show world coordinate axes in the 3D view
     "show_perf": True,        # show the FPS/GPU usage counter
     "show_backend": True,     # show the renderer name in the 3D view
+    "controller_enabled": False,
 }
 
 # ---- theme ----

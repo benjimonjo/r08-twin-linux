@@ -33,6 +33,7 @@ from .planner import Press, plan_presses, step_value
 from .wayland_input import WaylandPointer
 from .github_updater import check_for_updates, install_update
 from .gpu_usage import GpuUsageMonitor
+from .controller import Controller, CONTROLLER_ACTIONS
 from .object_points import parse_xyz_points
 from types import SimpleNamespace
 
@@ -1006,6 +1007,7 @@ class QtApp:
         self.setup_queue = []
         self._interrupt_requested = False
         self.renderer, self.render_note = make_renderer(bool(self.settings.get("gpu", True)))
+        self.controller = Controller(self.cfg.get("controller_mapping"), self.cfg.get("controller_device", 0))
         self.robot_mesh, self.ghost_mesh, self.cam = RobotMesh(), RobotMesh(), Camera()
         self.q_vis = np.radians([0, 35, 25, 0, 40, 0]); self.q_target = self.q_vis.copy()
         self.q_vis_speed = 0.0
@@ -1102,6 +1104,16 @@ class QtApp:
         header.addWidget(brand); header.addStretch()
         self.read_state = QtWidgets.QLabel("Waiting for setup"); header.addWidget(self.read_state)
         view_menu = QtWidgets.QPushButton("3D View"); header.addWidget(view_menu)
+        controller_menu_button = QtWidgets.QPushButton("Controller"); header.addWidget(controller_menu_button)
+        controller_menu = QtWidgets.QMenu(self.window); controller_menu_button.setMenu(controller_menu)
+        self.controller_enabled_action = QtGui.QAction("Enable controller", controller_menu)
+        self.controller_enabled_action.setCheckable(True)
+        self.controller_enabled_action.setChecked(bool(self.settings.get("controller_enabled", False)))
+        self.controller_enabled_action.toggled.connect(self._set_controller_enabled)
+        controller_menu.addAction(self.controller_enabled_action)
+        self.controller_status_action = controller_menu.addAction("Status: checking…")
+        self.controller_status_action.setEnabled(False)
+        controller_menu.addAction("Configure button mapping…", self._configure_controller)
         helpb = QtWidgets.QPushButton("Help"); helpb.clicked.connect(self._help); header.addWidget(helpb)
         settingsb = QtWidgets.QPushButton("Settings"); settingsb.clicked.connect(self._settings); header.addWidget(settingsb)
         debugb = QtWidgets.QPushButton("Debug"); debugb.clicked.connect(self._toggle_debug); header.addWidget(debugb)
@@ -1523,6 +1535,137 @@ class QtApp:
         self.cfg.set("settings", self.settings)
         self.cfg.save()
         self.dirty = True
+
+    def _set_controller_enabled(self, enabled):
+        self.settings["controller_enabled"] = bool(enabled)
+        self.cfg.set("settings", self.settings)
+        self.cfg.save()
+
+    def _controller_action(self, action, magnitude=1.0):
+        if action == "Step+":
+            if magnitude >= 0.5:
+                self.step_combo.setCurrentIndex(min(self.step_combo.count() - 1, self.step_combo.currentIndex() + 1))
+            return
+        if action == "Step-":
+            if magnitude >= 0.5:
+                self.step_combo.setCurrentIndex(max(0, self.step_combo.currentIndex() - 1))
+            return
+        if action in CONTROLLER_ACTIONS[:12]:
+            axis = CONTROLLER_ACTIONS[:12].index(action) // 2
+            sign = 1 if action.endswith("+") else -1
+            self._jog_target(axis, sign, magnitude=magnitude)
+
+    def _configure_controller(self):
+        names = Controller.available()
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle("Controller mapping")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        if not names:
+            layout.addWidget(QtWidgets.QLabel(
+                "No controller detected. Install pygame and connect a controller, then reopen this menu."))
+        device = QtWidgets.QComboBox()
+        device.addItems(names or ["No controller detected"])
+        device.setCurrentIndex(min(self.controller.device_index, max(0, len(names) - 1)))
+        layout.addWidget(QtWidgets.QLabel("Controller"))
+        layout.addWidget(device)
+        form = QtWidgets.QFormLayout(); layout.addLayout(form)
+        mapping = dict(self.controller.mapping)
+        selectors = {}
+        binders = {}
+        rows = {}
+        capture_timer = QtCore.QTimer(dialog)
+        capture_timer.setInterval(50)
+        capture_action = [None]
+        capture_status = QtWidgets.QLabel("Select Bind, then press a controller button, D-pad direction, or move a joystick.")
+        capture_status.setProperty("muted", True)
+        layout.addWidget(capture_status)
+
+        def rebuild_buttons(index):
+            for row in rows.values():
+                form.removeRow(row)
+            selectors.clear()
+            binders.clear()
+            rows.clear()
+            options = Controller.button_options(index)
+            if not options:
+                options = [
+                    (button, f"Button {button}") for button in range(64)
+                ] + [
+                    (f"hat0:{direction}", f"D-pad {label} (hat 0)")
+                    for direction, label in (
+                        ("up", "Up"), ("down", "Down"),
+                        ("left", "Left"), ("right", "Right")
+                    )
+                ]
+            for action in CONTROLLER_ACTIONS:
+                selector = QtWidgets.QComboBox()
+                for button, label in options:
+                    selector.addItem(label, button)
+                current = mapping.get(action, 0)
+                match = selector.findData(current)
+                selector.setCurrentIndex(match if match >= 0 else 0)
+                row = QtWidgets.QWidget()
+                row_layout = QtWidgets.QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.addWidget(selector)
+                binder = QtWidgets.QPushButton("Bind")
+                row_layout.addWidget(binder)
+                form.addRow(action, row)
+                selectors[action] = selector
+                binders[action] = binder
+                rows[action] = row
+                binder.clicked.connect(lambda checked=False, name=action: start_capture(name))
+
+        def start_capture(action):
+            capture_action[0] = action
+            capture_status.setText(f"Press a control for {action}…")
+            for binder in binders.values():
+                binder.setEnabled(False)
+            binders[action].setEnabled(True)
+
+        def read_capture():
+            action = capture_action[0]
+            if action is None:
+                return
+            control = self.controller.capture_control()
+            if control is None:
+                return
+            selector = selectors[action]
+            match = selector.findData(control)
+            if match < 0:
+                selector.addItem(f"Unlisted control ({control})", control)
+                match = selector.count() - 1
+            selector.setCurrentIndex(match)
+            capture_status.setText(f"{action} mapped to {selector.currentText()}")
+            capture_action[0] = None
+            for binder in binders.values():
+                binder.setEnabled(True)
+
+        capture_timer.timeout.connect(read_capture)
+        device.currentIndexChanged.connect(lambda index: (
+            self.controller.set_device(index),
+            rebuild_buttons(index),
+        ))
+        rebuild_buttons(device.currentIndex())
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        capture_timer.start()
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            capture_timer.stop()
+            return
+        capture_timer.stop()
+        self.controller.mapping = {
+            action: selector.currentData() for action, selector in selectors.items()
+        }
+        self.controller.set_device(device.currentIndex())
+        self.cfg.set("controller_mapping", self.controller.mapping)
+        self.cfg.set("controller_device", self.controller.device_index)
+        self.cfg.save()
+        self.controller_enabled_action.setChecked(True)
+        self.log("Controller mapping saved.")
 
     def _set_gpu_renderer(self, enabled):
         enabled = bool(enabled)
@@ -2331,7 +2474,7 @@ class QtApp:
         for i, field in enumerate(self.target_fields):
             field.setText(f"{pose[i]:.1f}")
 
-    def _jog_target(self, axis, sign):
+    def _jog_target(self, axis, sign, magnitude=1.0):
         pose = self._current_pose()
         if pose is None:
             self.log("Waiting for a readable robot pose."); return
@@ -2339,7 +2482,7 @@ class QtApp:
         try: value = float(field.text().strip().replace(",", ".").replace("−", "-"))
         except ValueError: value = float(pose[axis])
         if self.relative_box.isChecked(): value += pose[axis]
-        value += sign * step_value(self.step_combo.currentIndex(), axis)
+        value += sign * step_value(self.step_combo.currentIndex(), axis) * max(0.0, min(1.0, magnitude))
         if axis >= 3: value = wrap180(value)
         self.relative_box.setChecked(False)
         field.setText(f"{value:.1f}")
@@ -3156,6 +3299,12 @@ class QtApp:
 
     def _tick(self):
         now = clock(); dt = min(0.1, now - self.last_tick); self.last_tick = now
+        if self.settings.get("controller_enabled", False):
+            for action, magnitude in self.controller.poll():
+                self._controller_action(action, magnitude)
+            status = self.controller.error or (
+                self.controller.joystick.get_name() if self.controller.joystick else "No controller detected")
+            self.controller_status_action.setText(f"Status: {status}")
         self._check_active_camera(now)
         usage = self.gpu_monitor.latest
         if usage != self.gpu_usage:
@@ -3328,6 +3477,7 @@ class QtApp:
         self.ocr.stop(); self.step_reader.stop(); self.ik.stop()
         for worker in (self.ocr, self.step_reader, self.ik): worker.join(timeout=2)
         self.gpu_monitor.stop(); self.gpu_monitor.join(timeout=2)
+        self.controller.close()
         self._close_capture_sources()
         event.accept()
 
