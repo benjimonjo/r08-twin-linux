@@ -14,7 +14,34 @@ Reads the Position/Angle table off the stream, shows a live 3D twin, and guides 
 R08-twin-linux currently targets Linux, with the native Qt frontend used on
 Wayland sessions.
 
+> **Warning:** R08 only works with the **Excessive Overkill robot stream**.
+> It will not work with other streams or layouts.
+
 ### 1. Install Linux dependencies
+
+For a one-command install on a supported distribution, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/benjimonjo/r08_twin/main/install.sh | sh
+```
+
+This detects `apt`, `dnf`, `pacman`, or `zypper`, installs the system
+dependencies, clones R08 into `~/.local/share/r08-twin`, creates its virtual
+environment, and adds an application-menu shortcut. Review the script before
+running it if your local security policy does not allow piping downloaded
+scripts to a shell. Set `R08_SKIP_SYSTEM_DEPS=1` to skip package-manager
+installation, or set `R08_INSTALL_DIR` to choose another install directory.
+The installer checks for Discord because the Excessive Overkill robot stream
+is provided through Discord. If Discord is missing, it offers a native
+distribution package, the official Flatpak package, or exiting. Use
+`R08_INSTALL_DISCORD=1` to install the native package non-interactively, or
+`R08_INSTALL_DISCORD=0` to exit.
+
+To install from a checked-out copy instead:
+
+```bash
+./install.sh
+```
 
 Choose the command for your distribution. Debian-based derivatives such as
 Linux Mint and Pop!_OS use the Debian/Ubuntu command.
@@ -24,7 +51,7 @@ Linux Mint and Pop!_OS use the Debian/Ubuntu command.
 ```bash
 sudo apt update
 sudo apt install \
-  python3-venv python3-dev python3-gi gir1.2-xdp-1.0 \
+  build-essential python3-venv python3-dev python3-gi gir1.2-xdp-1.0 \
   gstreamer1.0-pipewire tesseract-ocr \
   xdg-desktop-portal xdg-desktop-portal-kde
 ```
@@ -33,25 +60,26 @@ sudo apt install \
 
 ```bash
 sudo dnf install \
-  python3 python3-pip python3-devel python3-gobject \
-  libportal-devel gstreamer1-plugin-pipewire tesseract \
+  gcc gcc-c++ make python3 python3-devel python3-gobject \
+  libportal-devel pipewire-gstreamer tesseract \
   xdg-desktop-portal xdg-desktop-portal-kde
 ```
 
 #### Arch Linux and Manjaro
 
 ```bash
-sudo pacman -S --needed \
-  python python-pip python-virtualenv python-gobject \
-  libportal gst-plugin-pipewire tesseract \
-  xdg-desktop-portal xdg-desktop-portal-kde
+sudo pacman -S --needed --disable-sandbox \
+  base-devel python python-gobject \
+  libportal gst-plugin-pipewire tesseract tesseract-data-eng \
+  xdg-desktop-portal xdg-desktop-portal-kde \
+  qt6-multimedia-gstreamer pipewire-jack
 ```
 
 #### openSUSE Tumbleweed and Leap
 
 ```bash
 sudo zypper install \
-  python3 python3-pip python3-devel python3-gobject \
+  gcc gcc-c++ make python3 python3-devel python3-gobject \
   libportal-devel gstreamer-plugin-pipewire tesseract-ocr \
   xdg-desktop-portal xdg-desktop-portal-kde
 ```

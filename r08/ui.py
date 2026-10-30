@@ -82,7 +82,7 @@ class App:
         self.robot_mesh, self.ghost_mesh, self.cam = RobotMesh(), RobotMesh(), Camera()
         self.q_vis = np.radians([0.0, 35.0, 25.0, 0.0, 40.0, 0.0])
         self.q_target = self.q_vis.copy()
-        self.q_vis_velocity = np.zeros(6)
+        self.q_vis_speed = 0.0
         self.live_t, self.last_seq = None, -1
         self.trail_list, self.trail_arr = [], None
         self.ghost, self.ghost_t, self.ghost_warned = None, None, False
@@ -1303,15 +1303,17 @@ class App:
         diff = self.q_target - self.q_vis
         for i in K.INFINITE_JOINTS:
             diff[i] = math.radians(wrap180(math.degrees(diff[i])))
-        if float(np.max(np.abs(diff))) > 2e-4:
+        max_diff = float(np.max(np.abs(diff)))
+        if max_diff > 2e-4:
             vmax = math.radians(float(self.settings.get("viz_deg_s", 25.0)))
-            target_velocity = np.clip(diff * 8.0, -vmax, vmax)
-            accel = math.radians(90.0)
-            self.q_vis_velocity += np.clip(target_velocity - self.q_vis_velocity, -accel * dt, accel * dt)
-            self.q_vis += self.q_vis_velocity * dt
+            direction = diff / max_diff
+            target_speed = min(vmax, max_diff * 8.0)
+            accel = math.radians(180.0)
+            self.q_vis_speed += float(np.clip(target_speed - self.q_vis_speed, -accel * dt, accel * dt))
+            self.q_vis += direction * self.q_vis_speed * dt
             self.dirty = True
         else:
-            self.q_vis_velocity *= math.exp(-dt * 12.0)
+            self.q_vis_speed *= math.exp(-dt * 12.0)
         if ghost is not None and ghost.t != self.ghost_t and (self.guide.active or self._has_field_input()):
             self.ghost_t = ghost.t
             ok = ghost.pe < 15.0 and ghost.re < 6.0

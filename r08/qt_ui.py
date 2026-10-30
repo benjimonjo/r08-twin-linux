@@ -1008,7 +1008,7 @@ class QtApp:
         self.renderer, self.render_note = make_renderer(bool(self.settings.get("gpu", True)))
         self.robot_mesh, self.ghost_mesh, self.cam = RobotMesh(), RobotMesh(), Camera()
         self.q_vis = np.radians([0, 35, 25, 0, 40, 0]); self.q_target = self.q_vis.copy()
-        self.q_vis_velocity = np.zeros(6)
+        self.q_vis_speed = 0.0
         self.visual_q = None
         self.visual_q_time = 0.0
         self.visual_arm_point = None
@@ -3208,15 +3208,18 @@ class QtApp:
         diff = target_q - self.q_vis
         for i in K.INFINITE_JOINTS:
             diff[i] = math.radians(wrap180(math.degrees(diff[i])))
-        if np.max(np.abs(diff)) > 2e-4:
+        max_diff = float(np.max(np.abs(diff)))
+        if max_diff > 2e-4:
             vmax = math.radians(float(self.settings.get("viz_deg_s", 25)))
             smoothing = float(np.clip(self.settings.get("pose_smoothing", 0.28), 0.05, 1.0))
-            target_velocity = np.clip(diff * (4.0 + 12.0 * smoothing), -vmax, vmax)
-            accel = math.radians(90.0)
-            self.q_vis_velocity += np.clip(target_velocity - self.q_vis_velocity, -accel * dt, accel * dt)
-            self.q_vis += self.q_vis_velocity * dt; self.dirty = True
+            direction = diff / max_diff
+            target_speed = min(vmax, max_diff * (4.0 + 12.0 * smoothing))
+            accel = math.radians(120.0 + 180.0 * smoothing)
+            self.q_vis_speed += float(np.clip(target_speed - self.q_vis_speed, -accel * dt, accel * dt))
+            self.q_vis += direction * self.q_vis_speed * dt
+            self.dirty = True
         else:
-            self.q_vis_velocity *= math.exp(-dt * 12.0)
+            self.q_vis_speed *= math.exp(-dt * 12.0)
         camera_region = self.cfg.get("camera_region")
         if ((self.gaussian_splats.isChecked() or self.camera_texture.isChecked() or
              self.debug_camera_preview.isChecked()) and camera_region and
