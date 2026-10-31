@@ -101,6 +101,10 @@ python -m pip install -r requirements.txt
 
 The requirements include the Qt, OCR, capture, input, and rendering packages.
 `moderngl` is optional at runtime; without it, R08 uses the CPU renderer.
+On Wayland, R08 selects EGL device 0 for the GPU renderer. Set
+`R08_GPU_DEVICE_INDEX` before launching if your active GPU has a different EGL
+device index. If the renderer still reports CPU mode, check that the loaded
+NVIDIA kernel module version matches the installed NVIDIA userspace libraries.
 `pygame` is optional and enables the **Controller** menu. Connect a game
 controller, open **Controller → Configure button mapping**, and choose the
 named buttons for the six position and six angle directions plus Step+/Step−.
@@ -130,8 +134,9 @@ button UI after you log in manually, and does not require a Discord token.
 The installer installs Playwright and its Chromium browser automatically.
 For a manual virtual-environment install, run `pip install playwright &&
 playwright install chromium`; choose the transport under **Controller → Set
-controller input mode**. Browser mode is always visible (headless mode is not
-used).
+controller input mode**. The first launch is visible for manual Discord login;
+later launches use the saved login session headlessly. If the session expires,
+R08 reopens the browser visibly for login.
 
 ### 3. Start the application
 
@@ -169,6 +174,8 @@ The native UI also has a **Configuration** tab containing the capture, number
 table, panel-button, camera-video, step-size, and status setup actions. Its
 **Find arm reach limits** action samples the configured joint limits and stores
 an estimated TCP workspace bounding box in the configuration.
+The optional **Debug** tab is enabled from **Settings → Show Debug tab** and
+appears beside Configuration in the main window.
 The Live twin view includes **Map camera onto robot** and **Overlay camera
 feed**. Configure the Discord camera region, select Camera 1 or Camera 2,
 switch that PTZ camera to its home position, then choose

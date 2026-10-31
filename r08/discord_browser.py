@@ -31,6 +31,8 @@ BUTTON_TEXT: Dict[str, str] = {k: k for k in config.CUSTOM_IDS}
 TEXT_CHANNEL_ID = "1191491623159332976"
 PANEL_COMMANDS = {"main": "/controls", "safe": "/robotpanel"}
 PANEL_PROBE = {"main": "X+", "safe": "Safe J23"}
+BROWSER_WIDTH = 1280
+BROWSER_HEIGHT = 1400
 
 _STOP = object()
 
@@ -45,16 +47,17 @@ class BrowserPanel:
         button_text: Optional[Dict[str, str]] = None,
         text_overrides_file: Optional[str | Path] = None,
         url: Optional[str] = None,          # override (used by tests)
-        headless: bool = False,             # retained for API compatibility; always headed
+        headless: bool = False,             # retained for API compatibility; profile controls mode
         summon_on_start: bool = True,
         cooldown_s: float = config.COOLDOWN_S,
         click_timeout_ms: int = 3000,
         on_result: Optional[Callable[[str, bool, str], None]] = None,
     ):
         self.profile_dir = str(Path(profile_dir).expanduser())
+        self.login_marker = Path(self.profile_dir) / ".r08_logged_in"
         self.channel_id = channel_id
         self.url = url or f"https://discord.com/channels/{guild_id}/{channel_id}"
-        self.headless = False
+        self.headless = not self.login_marker.exists()
         self.summon_on_start = summon_on_start
         self.cooldown_s = cooldown_s
         self.click_timeout_ms = click_timeout_ms
@@ -206,13 +209,19 @@ class BrowserPanel:
             return
         try:
             with sync_playwright() as pw:
-                ctx = pw.chromium.launch_persistent_context(
-                    self.profile_dir, headless=False,
-                    viewport={"width": 1280, "height": 800})
+                ctx = self._launch_context(pw, self.headless)
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 page.goto(self.url)
+                if self.headless and "/login" in page.url:
+                    ctx.close()
+                    self.headless = False
+                    ctx = self._launch_context(pw, False)
+                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                    page.goto(self.url)
                 if self.summon_on_start:
-                    page.locator('div[role="textbox"]').first.wait_for(timeout=120_000)
+                    self._wait_for_login(page)
+                    self.login_marker.parent.mkdir(parents=True, exist_ok=True)
+                    self.login_marker.touch()
                     self._ensure(page)
                 self._ready.set()
                 while True:
@@ -241,6 +250,18 @@ class BrowserPanel:
             self._error = exc
             self._ready.set()
             log.exception("browser thread died")
+
+    def _launch_context(self, playwright, headless):
+        return playwright.chromium.launch_persistent_context(
+            self.profile_dir,
+            headless=headless,
+            args=[f"--window-size={BROWSER_WIDTH},{BROWSER_HEIGHT}"],
+            viewport={"width": BROWSER_WIDTH, "height": BROWSER_HEIGHT})
+
+    def _wait_for_login(self, page):
+        if "/login" in page.url:
+            page.wait_for_url("**/channels/**", timeout=120_000)
+        page.locator('div[role="textbox"]').first.wait_for(timeout=30_000)
 
 
 if __name__ == "__main__":

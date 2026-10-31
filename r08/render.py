@@ -16,6 +16,7 @@ Frame fields (SimpleNamespace, built in ui.App._render):
     hud dict     keys: tip_text, ghost_text, msg, fps, backend
 """
 import math
+import os
 import numpy as np
 import cv2
 from .common import C, hex_rgb
@@ -143,7 +144,20 @@ class GLBackend:
     def __init__(self):
         import moderngl
         self.mgl = moderngl
-        self.ctx = moderngl.create_standalone_context()
+        # ModernGL defaults to X11 when DISPLAY is set, even inside a
+        # Wayland session. That can fail through Xwayland before EGL is tried.
+        backend = "egl" if os.environ.get("WAYLAND_DISPLAY") else None
+        if backend:
+            # EGL device 0 is the first hardware adapter. The other visible
+            # EGL device can be llvmpipe when a second GPU is reserved for
+            # vfio-pci. R08_GPU_DEVICE_INDEX allows setups with a different
+            # EGL ordering to select another adapter.
+            device_index = int(os.environ.get("R08_GPU_DEVICE_INDEX", "0"))
+            self.ctx = moderngl.create_standalone_context(
+                backend=backend, device_index=device_index
+            )
+        else:
+            self.ctx = moderngl.create_standalone_context()
         self.prog = self.ctx.program(vertex_shader=VS, fragment_shader=FS)
         self.lprog = self.ctx.program(vertex_shader=LVS, fragment_shader=LFS)
         self.sprog = self.ctx.program(vertex_shader=SPLAT_VS, fragment_shader=SPLAT_FS)

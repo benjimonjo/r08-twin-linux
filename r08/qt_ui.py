@@ -1133,13 +1133,13 @@ class QtApp:
         controller_menu.addAction(self.controller_enabled_action)
         self.controller_status_action = controller_menu.addAction("Status: checking…")
         self.controller_status_action.setEnabled(False)
+        controller_menu.addAction("Retry Discord controls", self._retry_discord_controls)
         controller_menu.addAction("Set controller input mode…", self._controller_input_mode_dialog)
         controller_menu.addAction("Set held-input repeat delay…", self._controller_repeat_delay_dialog)
         controller_menu.addAction("Configure button mapping…", self._configure_controller)
         controller_menu.addAction("Controller input readout…", self._controller_readout)
         helpb = QtWidgets.QPushButton("Help"); helpb.clicked.connect(self._help); header.addWidget(helpb)
         settingsb = QtWidgets.QPushButton("Settings"); settingsb.clicked.connect(self._settings); header.addWidget(settingsb)
-        debugb = QtWidgets.QPushButton("Debug"); debugb.clicked.connect(self._toggle_debug); header.addWidget(debugb)
         self.update_button = QtWidgets.QPushButton("Check GitHub updates"); self.update_button.clicked.connect(self._update_button_clicked); header.addWidget(self.update_button)
         reloadb = QtWidgets.QPushButton("Reload scripts (dev)")
         reloadb.setToolTip("Save settings and restart R08 to load the current Python files")
@@ -1445,9 +1445,30 @@ class QtApp:
         layout.addWidget(debug)
         layout.addStretch()
         scroll.setWidget(page)
-        self.debug_dialog.add_panel(scroll)
+        debug_page = QtWidgets.QWidget()
+        debug_layout = QtWidgets.QVBoxLayout(debug_page)
+        debug_layout.setContentsMargins(18, 14, 18, 14)
+        debug_title = QtWidgets.QLabel("Debug")
+        debug_title.setStyleSheet(f"color:{C.yellow};font-size:18px;font-weight:700")
+        debug_layout.addWidget(debug_title)
+        debug_layout.addWidget(self.debug_dialog.output)
+        clear = QtWidgets.QPushButton("Clear log")
+        clear.clicked.connect(self.debug_dialog.output.clear)
+        debug_layout.addWidget(clear)
+        debug_layout.addWidget(scroll, 1)
+        self.debug_tab = debug_page
+        self.debug_tab_index = self.tabs.addTab(debug_page, "Debug")
+        self._set_debug_visibility(bool(self.settings.get("debug_enabled", False)))
         self._update_ocr_snapshot_preview()
         self._refresh_debug_calibration_status()
+
+    def _set_debug_visibility(self, enabled):
+        if not hasattr(self, "debug_tab_index"):
+            return
+        self.settings["debug_enabled"] = bool(enabled)
+        self.tabs.setTabVisible(self.debug_tab_index, bool(enabled))
+        if not enabled and self.tabs.currentIndex() == self.debug_tab_index:
+            self.tabs.setCurrentIndex(0)
 
     def _camera_texture_toggled(self, enabled):
         self.cfg.set("camera_texture_enabled", bool(enabled))
@@ -1764,6 +1785,19 @@ class QtApp:
             self.browser_panel = None
         if self.direct_controller_run or self.automated_run:
             self._stop_guided_move()
+
+    def _retry_discord_controls(self):
+        if self.settings.get("direct_panel_transport", "browser") != "browser":
+            self.log("Select Discord browser (Option B) as the direct panel transport first.")
+            return
+        if self.browser_panel is None:
+            self.log("Direct browser mode is not active. Select it in controller input mode first.")
+            return
+        try:
+            self.browser_panel.ensure_panels()
+            self.log("Retrying Discord control-panel discovery.")
+        except Exception as exc:
+            self.log(f"Could not retry Discord controls: {exc}")
 
     def _configure_controller(self):
         names = Controller.available()
@@ -2393,7 +2427,8 @@ class QtApp:
             spin.setValue(float(self.settings.get(key, low))); controls[key] = spin; form.addRow(label, spin)
         toggles = {}
         for key, label in (("verify_each", "Verify pose after each action"), ("step_plus_larger", "Step+ increases the step size"),
-                           ("self_learn", "Learn from confident digit reads")):
+                           ("self_learn", "Learn from confident digit reads"),
+                           ("debug_enabled", "Show Debug tab")):
             check = QtWidgets.QCheckBox(label); check.setChecked(bool(self.settings.get(key, True))); toggles[key] = check; form.addRow(check)
         input_mode = QtWidgets.QComboBox()
         input_mode.addItem("Plan target pose", "plan")
@@ -2406,6 +2441,7 @@ class QtApp:
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             for key, spin in controls.items(): self.settings[key] = spin.value()
             for key, check in toggles.items(): self.settings[key] = check.isChecked()
+            self._set_debug_visibility(self.settings["debug_enabled"])
             self.settings["controller_input_mode"] = input_mode.currentData()
             self.controller.set_repeat_delay(self.settings["controller_repeat_delay"])
             self.cfg.set("settings", self.settings); self.cfg.save()

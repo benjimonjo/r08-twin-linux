@@ -27,5 +27,10 @@ buttons**, then select **Discord browser (Option B)**. The browser opens when
 direct mode is selected, remains open while direct mode is active, and closes
 when direct mode or controller automation is disabled.
 
+The first launch is headed so the user can log in manually. After the login
+session is confirmed, R08 records it in the persistent profile and later
+launches headlessly. If Discord redirects the saved profile to login, R08
+reopens a headed browser for re-authentication.
+
 The token-based REST/self-bot client is intentionally not integrated. It would
 automate a Discord user account outside the supported application/bot flow.

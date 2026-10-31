@@ -36,22 +36,26 @@ install_system_dependencies() {
         sudo apt-get install -y \
             git build-essential python3 python3-venv python3-dev python3-gi gir1.2-xdp-1.0 \
             gstreamer1.0-pipewire tesseract-ocr \
+            libegl1 libgl1 libglvnd0 libgl1-mesa-dri mesa-utils \
             xdg-desktop-portal xdg-desktop-portal-kde
     elif command -v dnf >/dev/null 2>&1; then
         sudo dnf install -y \
             git gcc gcc-c++ make python3 python3-devel python3-gobject \
             libportal-devel pipewire-gstreamer tesseract \
+            mesa-libEGL mesa-libGL mesa-dri-drivers libglvnd-egl libglvnd-opengl \
             xdg-desktop-portal xdg-desktop-portal-kde
     elif command -v pacman >/dev/null 2>&1; then
         sudo pacman -Syu --needed --noconfirm --disable-sandbox \
             git base-devel python python-gobject \
             libportal gst-plugin-pipewire tesseract tesseract-data-eng \
+            mesa libglvnd \
             xdg-desktop-portal xdg-desktop-portal-kde \
             qt6-multimedia-gstreamer pipewire-jack
     elif command -v zypper >/dev/null 2>&1; then
         sudo zypper --non-interactive install \
             git gcc gcc-c++ make python3 python3-devel python3-gobject \
             libportal-devel gstreamer-plugin-pipewire tesseract-ocr \
+            Mesa-libEGL1 Mesa-libGL1 Mesa-dri-drivers libglvnd \
             xdg-desktop-portal xdg-desktop-portal-kde
     else
         fail "unsupported distribution; install the packages listed in README.md and rerun with R08_SKIP_SYSTEM_DEPS=1"
