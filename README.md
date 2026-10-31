@@ -31,11 +31,6 @@ environment, and adds an application-menu shortcut. Review the script before
 running it if your local security policy does not allow piping downloaded
 scripts to a shell. Set `R08_SKIP_SYSTEM_DEPS=1` to skip package-manager
 installation, or set `R08_INSTALL_DIR` to choose another install directory.
-The installer checks for Discord because the Excessive Overkill robot stream
-is provided through Discord. If Discord is missing, it offers a native
-distribution package, the official Flatpak package, or exiting. Use
-`R08_INSTALL_DISCORD=1` to install the native package non-interactively, or
-`R08_INSTALL_DISCORD=0` to exit.
 
 To install from a checked-out copy instead:
 
@@ -115,21 +110,21 @@ Joystick axes are also available, and each mapping row has a **Bind** button:
 click it and press the desired controller button, D-pad direction, or move the
 desired joystick direction. Holding a mapped button or D-pad direction repeats
 the jog, while joystick movement is proportional to stick deflection.
-Trigger axes are normalized from 0% when released to 100% when fully pressed.
-By default, the left trigger zooms in and the right trigger zooms out; these
-bindings can be changed in the controller mapping dialog.
-The controller mapping follows the PS5/Xbox layout by default: the sticks jog
-position, holding the **Angle modifier** switches them to Xa/Ya/Za, and holding
-the **View modifier** switches them to 3D orbit/pan. All modifier buttons and
-stick axes can be remapped and the camera axes inverted independently.
-Bind **View zoom in** and **View zoom out** to controller buttons or D-pad
-directions to zoom the 3D view without using the mouse wheel.
+#### Controller mapping
+
+- Trigger axes are normalized from 0% when released to 100% when fully pressed.
+- By default, the left trigger zooms in and the right trigger zooms out.
+- Holding the **Angle modifier** switches the sticks to Xa/Ya/Za.
+- Holding the **View modifier** switches the sticks to 3D orbit/pan.
+- **View zoom in** and **View zoom out** can be assigned to buttons or D-pad
+  directions.
+
 The mapping dialog separates Position, Angle, and View into panes. Each pane
-shows a controller diagram adapted to the detected PlayStation, Xbox,
-Nintendo, or generic controller type, with Bind controls for every action,
-including the Angle modifier and all Xa/Ya/Za directions. The editor is
-arranged by physical controller input: choose the function beside each
-button, trigger, D-pad direction, or axis.
+shows a controller diagram adapted to the detected PlayStation, Xbox, Nintendo,
+or generic controller type. The editor is arranged by physical controller
+input, with the function selector beside each button, trigger, D-pad direction,
+or axis. Modifier buttons and stick axes can be remapped, and camera axes can
+be inverted independently.
 The function menus are overlaid next to their corresponding controller
 glyphs, so each physical input can be configured in place.
 The selectors follow the controller callouts: Share, Touchpad, Options, L2/R2,
@@ -142,10 +137,12 @@ selector, following the DS4Windows-style button-selection workflow.
 PlayStation devices use the bundled PS4 controller glyph, while Xbox devices
 use a matching Xbox-style diagram. Current bindings are shown around the
 corresponding controller buttons and update as you edit them.
-For direct Discord browser control, **Show browser window (debug)** is available
-in the Controller menu. The menu also reports whether the browser window is
-visible, whether the main and safe panels were found, and the visible button
-labels in each panel.
+#### Direct browser control
+
+For direct Discord browser control, **Show browser window (debug)** is
+available in the Controller menu. The menu also reports whether the browser
+window is visible, whether the main and safe panels were found, and the visible
+button labels in each panel.
 **Controller input readout** shows every detected button, D-pad state, and
 joystick axis value live.
 The **Abort** action can also be assigned with **Bind**; it triggers once when
@@ -158,12 +155,18 @@ mode repeatedly clicks the calibrated robot-panel buttons and requires
 Direct mode can use **Discord browser (Option B)** instead of pointer
 automation. This opens a persistent Chromium profile, uses the real Discord
 button UI after you log in manually, and does not require a Discord token.
-The installer installs Playwright and its Chromium browser automatically.
-For a manual virtual-environment install, run `pip install playwright &&
-playwright install chromium`; choose the transport under **Controller → Set
-controller input mode**. The first launch is visible for manual Discord login;
-later launches use the saved login session headlessly. If the session expires,
-R08 reopens the browser visibly for login.
+The installer installs Playwright and its Chromium browser automatically. For a
+manual virtual-environment install, run:
+
+```bash
+python -m pip install playwright
+python -m playwright install chromium
+```
+
+Choose the transport under **Controller → Set controller input mode**. The
+first launch is visible for manual Discord login; later launches use the saved
+login session headlessly. If the session expires, R08 reopens the browser
+visibly for login.
 
 ### 3. Start the application
 
