@@ -62,106 +62,6 @@ install_system_dependencies() {
     fi
 }
 
-discord_available() {
-    command -v discord >/dev/null 2>&1 ||
-        command -v Discord >/dev/null 2>&1 ||
-        { command -v flatpak >/dev/null 2>&1 &&
-          if command -v timeout >/dev/null 2>&1; then
-              timeout 5 flatpak info com.discordapp.Discord >/dev/null 2>&1
-          else
-              flatpak info com.discordapp.Discord >/dev/null 2>&1
-          fi; }
-}
-
-install_flatpak() {
-    if command -v flatpak >/dev/null 2>&1; then
-        return
-    fi
-    if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
-        sudo apt-get install -y flatpak
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y flatpak
-    elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -S --needed --noconfirm --disable-sandbox flatpak
-    elif command -v zypper >/dev/null 2>&1; then
-        sudo zypper --non-interactive install flatpak
-    else
-        fail "Flatpak is unavailable; install Discord manually and rerun the installer"
-    fi
-}
-
-download_file() {
-    url=$1
-    destination=$2
-    if command -v curl >/dev/null 2>&1; then
-        curl -fL "$url" -o "$destination"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -O "$destination" "$url"
-    else
-        fail "curl or wget is required to download Discord"
-    fi
-}
-
-install_discord_native() {
-    discord_file=$(mktemp /tmp/discord.XXXXXX)
-    trap 'rm -f "$discord_file" "$discord_file.deb" "$discord_file.rpm"' 0 1 2 3 15
-    if command -v apt-get >/dev/null 2>&1; then
-        download_file "https://discord.com/api/download?platform=linux&format=deb" "$discord_file.deb"
-        sudo apt-get install -y "$discord_file.deb"
-    elif command -v dnf >/dev/null 2>&1; then
-        download_file "https://discord.com/api/download?platform=linux&format=rpm" "$discord_file.rpm"
-        sudo dnf install -y "$discord_file.rpm"
-    elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -S --needed --noconfirm --disable-sandbox discord
-    elif command -v zypper >/dev/null 2>&1; then
-        download_file "https://discord.com/api/download?platform=linux&format=rpm" "$discord_file.rpm"
-        sudo zypper --non-interactive install "$discord_file.rpm"
-    else
-        fail "native Discord installation is unavailable for this distribution"
-    fi
-}
-
-check_discord() {
-    discord_available && return
-    printf '%s\n' "Discord was not detected."
-    printf '%s\n' "R08 requires Discord to access the Excessive Overkill robot stream."
-    if [ "${R08_INSTALL_DISCORD:-}" = "1" ]; then
-        method=native
-    elif [ "${R08_INSTALL_DISCORD:-}" = "0" ]; then
-        method=exit
-    else
-        printf '%s\n' "Choose a Discord installation method:"
-        printf '%s\n' "  1) Native package (recommended)"
-        printf '%s\n' "  2) Flatpak"
-        printf '%s' "  3) Exit installer [3]: "
-        read -r method </dev/tty || method=exit
-        case "$method" in
-            1|native|NATIVE) method=native ;;
-            2|flatpak|FLATPAK) method=flatpak ;;
-            *) method=exit ;;
-        esac
-    fi
-    case "$method" in
-        native)
-            install_discord_native
-            discord_available ||
-                fail "Discord native installation finished but Discord was not detected"
-            ;;
-        flatpak)
-            install_flatpak
-            flatpak remote-add --if-not-exists flathub \
-                https://flathub.org/repo/flathub.flatpakrepo
-            flatpak install --system -y flathub com.discordapp.Discord
-            discord_available ||
-                fail "Discord installation finished but Discord was not detected"
-            ;;
-        *)
-            fail "Discord is required; install it and rerun the installer"
-            ;;
-    esac
-}
-
 warn_stream_requirement
 if [ "${R08_SKIP_SYSTEM_DEPS:-0}" != "1" ]; then
     install_system_dependencies
@@ -169,7 +69,6 @@ fi
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 command -v git >/dev/null 2>&1 || fail "git is required"
-check_discord
 
 mkdir -p "$(dirname "$INSTALL_DIR")"
 if [ -d "$INSTALL_DIR/.git" ]; then
