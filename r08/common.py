@@ -80,6 +80,7 @@ DEFAULT_SETTINGS = {
     "controller_enabled": False,
     "controller_input_mode": "plan",
     "direct_panel_transport": "browser",
+    "browser_debug_visible": False,
     "controller_axis_invert": {},
     "controller_repeat_delay": 0.12,  # seconds between held-button/D-pad repeats
 }

@@ -49,6 +49,7 @@ class BrowserPanel:
         url: Optional[str] = None,          # override (used by tests)
         headless: bool = False,             # retained for API compatibility; profile controls mode
         summon_on_start: bool = True,
+        debug_visible: bool = False,
         cooldown_s: float = config.COOLDOWN_S,
         click_timeout_ms: int = 3000,
         on_result: Optional[Callable[[str, bool, str], None]] = None,
@@ -57,7 +58,7 @@ class BrowserPanel:
         self.login_marker = Path(self.profile_dir) / ".r08_logged_in"
         self.channel_id = channel_id
         self.url = url or f"https://discord.com/channels/{guild_id}/{channel_id}"
-        self.headless = not self.login_marker.exists()
+        self.headless = not debug_visible and not self.login_marker.exists()
         self.summon_on_start = summon_on_start
         self.cooldown_s = cooldown_s
         self.click_timeout_ms = click_timeout_ms
@@ -107,6 +108,15 @@ class BrowserPanel:
         out: "queue.Queue" = queue.Queue()
         self._q.put(("list", out))
         return out.get(timeout=15)
+
+    def status(self, timeout: float = 0.25) -> Dict[str, object]:
+        """Return browser visibility, URL, panel presence, and visible buttons."""
+        out: "queue.Queue" = queue.Queue()
+        self._q.put(("status", out))
+        try:
+            return out.get(timeout=timeout)
+        except queue.Empty:
+            return {"ready": False, "error": "browser status unavailable"}
 
     def close(self) -> None:
         self._q.put(_STOP)
@@ -245,6 +255,29 @@ class BrowserPanel:
                                 (loc.nth(i).inner_text() or loc.nth(i).get_attribute("aria-label") or "").strip()
                                 for i in range(loc.count())]
                         arg.put(res)
+                    elif kind == "status":
+                        panels = {}
+                        buttons = {}
+                        for panel_kind in ("main", "safe"):
+                            panel = self._panel(page, panel_kind)
+                            present = panel.count() > 0
+                            panels[panel_kind] = present
+                            if present:
+                                loc = panel.get_by_role("button")
+                                buttons[panel_kind] = [
+                                    (loc.nth(i).inner_text() or
+                                     loc.nth(i).get_attribute("aria-label") or "").strip()
+                                    for i in range(loc.count())
+                                ]
+                            else:
+                                buttons[panel_kind] = []
+                        arg.put({
+                            "ready": True,
+                            "visible": not self.headless,
+                            "url": page.url,
+                            "panels": panels,
+                            "buttons": buttons,
+                        })
                 ctx.close()
         except BaseException as exc:  # noqa: BLE001
             self._error = exc

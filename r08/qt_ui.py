@@ -35,7 +35,8 @@ from .github_updater import check_for_updates, install_update
 from .gpu_usage import GpuUsageMonitor
 from .controller import (
     Controller, CONTROLLER_ACTIONS, VIEW_MODIFIER, ANGLE_MODIFIER,
-    VIEW_AXIS_ACTIONS, VIEW_MAPPING_DEFAULTS, STICK_MAPPING_DEFAULTS,
+    VIEW_AXIS_ACTIONS, VIEW_BUTTON_ACTIONS, VIEW_MAPPING_DEFAULTS, STICK_MAPPING_DEFAULTS,
+    TRIGGER_AXIS_START,
     ABORT_ACTION,
 )
 try:
@@ -75,6 +76,263 @@ class SceneLabel(QtWidgets.QLabel):
     def mouseReleaseEvent(self, event): self._last = None
     def wheelEvent(self, event):
         self.wheeled.emit(int(event.angleDelta().y() / 120)); event.accept()
+
+
+class ControllerDiagram(QtWidgets.QWidget):
+    controlClicked = QtCore.Signal(object)
+
+    def __init__(self, controller_name="", parent=None):
+        super().__init__(parent)
+        self.controller_name = controller_name
+        self.mapping = {}
+        self.actions = ()
+        self.input_controls = []
+        self.ps4_glyph = QtGui.QPixmap(
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "controller_ps4.png"))
+        asset_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
+        self.ps5_glyph = QtGui.QPixmap(os.path.join(asset_dir, "controller_ps5.png"))
+        self.xbox_glyph = QtGui.QPixmap(os.path.join(asset_dir, "controller_xbox.png"))
+        self.setMinimumSize(250, 210)
+
+    def set_controller_name(self, name):
+        self.controller_name = name
+        self.update()
+
+    def set_bindings(self, mapping, actions):
+        self.mapping = dict(mapping)
+        self.actions = tuple(actions)
+        self.update()
+
+    def set_input_controls(self, controls):
+        for widget, _ in self.input_controls:
+            widget.deleteLater()
+        self.input_controls = list(controls)
+        for widget, _ in self.input_controls:
+            widget.setParent(self)
+            widget.show()
+        self._position_input_controls()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_input_controls()
+
+    def _family(self):
+        name = self.controller_name.lower()
+        if any(token in name for token in ("playstation", "dualshock", "dualsense", "ps4", "ps5")):
+            return "PlayStation"
+        if any(token in name for token in ("xbox", "x-input", "xinput")):
+            return "Xbox"
+        if any(token in name for token in ("switch", "nintendo", "joy-con", "pro controller")):
+            return "Nintendo"
+        return "Generic"
+
+    def _glyph(self):
+        name = self.controller_name.lower()
+        if any(token in name for token in ("xbox", "x-input", "xinput")):
+            return self.xbox_glyph
+        if any(token in name for token in ("dualsense", "ps5")):
+            return self.ps5_glyph
+        if any(token in name for token in ("playstation", "dualshock", "ps4")):
+            return self.ps4_glyph
+        return QtGui.QPixmap()
+
+    def _position_input_controls(self):
+        source_positions = {
+            "xbox": {
+                6: (195, 72), 11: (620, 28), 7: (1060, 72),
+                4: (100, 210), 5: (1140, 210), 8: (445, 695),
+                9: (620, 695), 10: (750, 695),
+                0: (1145, 255), 1: (1145, 300), 2: (1145, 385), 3: (1145, 470),
+            },
+            "ps5": {
+                6: (195, 72), 11: (535, 28), 7: (715, 28),
+                4: (100, 125), 5: (1140, 125), 8: (445, 695),
+                9: (620, 695), 10: (750, 695),
+                0: (1145, 310), 1: (1145, 370), 2: (1145, 430), 3: (1145, 490),
+            },
+            "ps4": {
+                6: (195, 72), 11: (535, 28), 7: (715, 28),
+                4: (100, 125), 5: (1140, 125), 8: (445, 695),
+                9: (620, 695), 10: (750, 695),
+                0: (1145, 325), 1: (1145, 395), 2: (1145, 460), 3: (1145, 530),
+            },
+        }
+        glyph = self._glyph_rect()
+        asset_key = "xbox" if self._glyph() is self.xbox_glyph else (
+            "ps5" if self._glyph() is self.ps5_glyph else "ps4")
+        width = min(190, max(165, self.width() // 7))
+        height = 32
+        placements = []
+        for widget, control in self.input_controls:
+            absolute = False
+            if isinstance(control, int):
+                x, y = self._glyph_point(glyph, source_positions[asset_key].get(control, (629, 384)))
+                absolute = True
+            elif isinstance(control, str) and control.startswith("axis"):
+                axis = int(control[4:].split(":")[0])
+                axis_positions = {
+                    "xbox": {0: (420, 655), 1: (520, 655), 2: (730, 655), 3: (830, 655),
+                             4: (195, 72), 5: (1060, 72)},
+                    "ps5": {0: (420, 655), 1: (520, 655), 2: (730, 655), 3: (830, 655),
+                            4: (195, 72), 5: (1060, 72)},
+                    "ps4": {0: (420, 655), 1: (520, 655), 2: (730, 655), 3: (830, 655),
+                            4: (195, 72), 5: (1060, 72)},
+                }
+                x, y = self._glyph_point(glyph, axis_positions[asset_key].get(axis, (629, 384)))
+                absolute = True
+            elif isinstance(control, str) and control.startswith("hat0:"):
+                direction = control.removeprefix("hat0:")
+                dpad_positions = {
+                    "xbox": {"up": (390, 728), "right": (485, 728), "down": (580, 728), "left": (675, 728)},
+                    "ps5": {"up": (75, 285), "right": (75, 325), "down": (75, 365), "left": (75, 405)},
+                    "ps4": {"up": (75, 300), "right": (75, 345), "down": (75, 390), "left": (75, 435)},
+                }
+                x, y = self._glyph_point(glyph, dpad_positions[asset_key].get(direction, (75, 345)))
+                absolute = True
+            else:
+                x, y = (0.5, 0.5)
+            x = x if absolute else self.width() * x
+            y = y if absolute else self.height() * y
+            side = (
+                "left" if x < self.width() * 0.35 else
+                "right" if x > self.width() * 0.65 else
+                "horizontal"
+            )
+            placements.append([widget, x, y, side])
+
+        for side in ("left", "right"):
+            group = sorted((item for item in placements if item[3] == side), key=lambda item: item[2])
+            previous_bottom = -height
+            for item in group:
+                item[2] = max(item[2] - height / 2, previous_bottom + 6 + height / 2)
+                previous_bottom = item[2] + height / 2
+        for side in ("horizontal",):
+            group = sorted((item for item in placements if item[3] == side), key=lambda item: item[1])
+            previous_right = -6
+            for item in group:
+                item[1] = max(item[1], previous_right + 6 + width / 2)
+                previous_right = item[1] + width / 2
+
+        for widget, x, y, _ in placements:
+            widget.setGeometry(
+                max(0, min(self.width() - width, int(x - width / 2))),
+                max(0, min(self.height() - height, int(y - height / 2))),
+                width, height)
+            widget.raise_()
+
+    def _glyph_rect(self):
+        glyph = self._glyph()
+        if not glyph.isNull():
+            size = glyph.scaled(
+                QtCore.QSize(int(self.width() * 0.78), int(self.height() * 0.78)),
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation).size()
+        else:
+            size = QtCore.QSize(int(self.width() * 0.80), int(self.height() * 0.55))
+        return QtCore.QRect(
+            self.rect().center() - QtCore.QPoint(size.width() // 2, size.height() // 2),
+            size)
+
+    @staticmethod
+    def _glyph_point(rect, source):
+        return (
+            rect.left() + rect.width() * source[0] / 1258,
+            rect.top() + rect.height() * source[1] / 768)
+
+    def mousePressEvent(self, event):
+        point = event.position()
+        nearest = None
+        nearest_distance = float("inf")
+        for widget, control in self.input_controls:
+            center = widget.geometry().center()
+            distance = (center.x() - point.x()) ** 2 + (center.y() - point.y()) ** 2
+            if distance < nearest_distance:
+                nearest, nearest_distance = control, distance
+        if nearest is not None and nearest_distance <= (self.width() * 0.18) ** 2:
+            self.controlClicked.emit(nearest)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _control_text(self, action):
+        control = self.mapping.get(action)
+        if control is None:
+            return "Unassigned"
+        if isinstance(control, int):
+            return f"Button {control}"
+        if isinstance(control, str):
+            return control.replace("hat0:", "D-pad ").replace("axis", "Axis ")
+        return str(control)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QtGui.QColor("#15181e"))
+        name = self.controller_name.lower()
+        if any(token in name for token in ("playstation", "dualshock", "dualsense", "ps4", "ps5")):
+            family, accent = "PlayStation", "#6aa6ff"
+        elif any(token in name for token in ("xbox", "x-input", "xinput")):
+            family, accent = "Xbox", "#78d98b"
+        elif any(token in name for token in ("switch", "nintendo", "joy-con", "pro controller")):
+            family, accent = "Nintendo", "#f08080"
+        else:
+            family, accent = "Generic", "#f5c900"
+        glyph = self._glyph()
+        if not glyph.isNull():
+            image = glyph.scaled(
+                self._glyph_rect().size(), QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation)
+            painter.drawPixmap(self._glyph_rect().topLeft(), image)
+        else:
+            self._draw_controller_shape(painter, family, accent)
+        self._draw_binding_labels(painter, family, accent)
+
+    def _draw_controller_shape(self, painter, family, accent):
+        pen = QtGui.QPen(QtGui.QColor(accent), 3)
+        painter.setPen(pen)
+        painter.setBrush(QtGui.QColor("#292e36"))
+        body = QtCore.QRectF(35, 55, self.width() - 70, 105)
+        painter.drawRoundedRect(body, 35, 35)
+        painter.setBrush(QtGui.QColor("#1a1d23"))
+        painter.drawEllipse(QtCore.QRectF(self.width() / 2 - 42, 78, 84, 55))
+        painter.setBrush(QtGui.QColor(accent))
+        if family == "Xbox":
+            painter.drawEllipse(QtCore.QRectF(75, 92, 18, 18))
+            painter.drawEllipse(QtCore.QRectF(self.width() - 93, 92, 18, 18))
+            label = "Y X B A"
+        elif family == "Nintendo":
+            painter.drawEllipse(QtCore.QRectF(75, 92, 18, 18))
+            painter.drawEllipse(QtCore.QRectF(self.width() - 93, 92, 18, 18))
+            label = "X Y A B"
+        else:
+            painter.drawEllipse(QtCore.QRectF(75, 92, 18, 18))
+            painter.drawEllipse(QtCore.QRectF(self.width() - 93, 92, 18, 18))
+            label = "Buttons"
+        painter.setPen(QtGui.QColor("#e8e9ed"))
+        painter.drawText(QtCore.QRectF(0, 20, self.width(), 25),
+                         QtCore.Qt.AlignmentFlag.AlignCenter, family)
+        painter.drawText(QtCore.QRectF(0, 170, self.width(), 25),
+                         QtCore.Qt.AlignmentFlag.AlignCenter, label)
+
+    def _draw_binding_labels(self, painter, family, accent):
+        if not self.actions:
+            return
+        painter.setPen(QtGui.QColor("#e8e9ed"))
+        font = painter.font()
+        font.setPointSize(8)
+        painter.setFont(font)
+        positions = [
+            QtCore.QPoint(4, 42), QtCore.QPoint(4, 72), QtCore.QPoint(4, 102),
+            QtCore.QPoint(self.width() - 112, 42), QtCore.QPoint(self.width() - 112, 72),
+            QtCore.QPoint(self.width() - 112, 102), QtCore.QPoint(4, 190),
+            QtCore.QPoint(self.width() - 112, 190),
+        ]
+        for index, action in enumerate(self.actions[:len(positions)]):
+            text = f"{action}: {self._control_text(action)}"
+            painter.drawText(QtCore.QRectF(positions[index], QtCore.QSizeF(108, 30)),
+                             QtCore.Qt.AlignmentFlag.AlignLeft |
+                             QtCore.Qt.AlignmentFlag.AlignVCenter |
+                             QtCore.Qt.TextFlag.TextWordWrap, text)
 
 
 class PortalSignals(QtCore.QObject):
@@ -1033,6 +1291,8 @@ class QtApp:
         self.wayland_pointer = None; self.automated_run = False
         self.direct_controller_run = False
         self.browser_panel = None
+        self.browser_status_action = None
+        self._last_browser_status_time = 0.0
         self.auto_next_allowed = 0.0; self.auto_verify_deadline = 0.0
         self.update_worker = None
         self.workspace_worker = None
@@ -1075,24 +1335,30 @@ class QtApp:
             detail = ("Choose the window containing the number table and camera stream."
                       if source == "window" else
                       "Choose the monitor containing the number table and camera stream.")
+            self.capture_init_purpose = "startup_stream"
             self.portal_selection_hint = self._show_portal_selection_hint(
                 "Select main R08 capture",
                 "Choose the primary R08 screen share.",
                 detail)
-            self.capture_init_purpose = "startup_stream"
-            self.capture_init_worker = CaptureInitWorker(
-                separate=False, source=source,
-                restore_token=self._capture_restore_token(False, source),
-                parent=self.window)
-            self.capture_init_worker.finished_result.connect(self._capture_init_finished)
-            self.capture_init_worker.start()
-            self.log("Opening the main screen-share chooser. Select the number table and camera stream…")
+            self.portal_selection_hint.accepted.connect(
+                lambda: self._begin_startup_stream_capture(source))
             return
         self.log("Main R08 capture already active.")
         if self.settings.get("controller_input_mode") == "direct" and browser_transport:
             self._start_direct_controller_session()
         elif not browser_transport:
             self._start_startup_button_capture()
+
+    def _begin_startup_stream_capture(self, source):
+        if self.capture_init_worker is not None:
+            return
+        self.capture_init_worker = CaptureInitWorker(
+            separate=False, source=source,
+            restore_token=self._capture_restore_token(False, source),
+            parent=self.window)
+        self.capture_init_worker.finished_result.connect(self._capture_init_finished)
+        self.capture_init_worker.start()
+        self.log("Opening the main screen-share chooser. Select the number table and camera stream…")
 
     def _start_startup_button_capture(self):
         if self.button_capture is not None:
@@ -1134,6 +1400,13 @@ class QtApp:
         self.controller_status_action = controller_menu.addAction("Status: checking…")
         self.controller_status_action.setEnabled(False)
         controller_menu.addAction("Retry Discord controls", self._retry_discord_controls)
+        browser_debug_action = QtGui.QAction("Show browser window (debug)", controller_menu)
+        browser_debug_action.setCheckable(True)
+        browser_debug_action.setChecked(bool(self.settings.get("browser_debug_visible", False)))
+        browser_debug_action.toggled.connect(self._set_browser_debug_visible)
+        controller_menu.addAction(browser_debug_action)
+        self.browser_status_action = controller_menu.addAction("Browser: not running")
+        self.browser_status_action.setEnabled(False)
         controller_menu.addAction("Set controller input mode…", self._controller_input_mode_dialog)
         controller_menu.addAction("Set held-input repeat delay…", self._controller_repeat_delay_dialog)
         controller_menu.addAction("Configure button mapping…", self._configure_controller)
@@ -1661,6 +1934,11 @@ class QtApp:
                 self._stop_direct_controller_session()
 
     def _controller_action(self, action, magnitude=1.0):
+        action = action.removeprefix("Position ").removeprefix("Angle ")
+        if action in VIEW_BUTTON_ACTIONS:
+            if magnitude >= 0.5:
+                self._camera_zoom(1 if action == VIEW_BUTTON_ACTIONS[0] else -1)
+            return
         if action.startswith(f"{VIEW_MODIFIER}:"):
             _, view_action, direction = action.split(":")
             view_axes = {
@@ -1765,7 +2043,8 @@ class QtApp:
                 return
             if self.browser_panel is None:
                 try:
-                    self.browser_panel = BrowserPanel()
+                    self.browser_panel = BrowserPanel(
+                        debug_visible=bool(self.settings.get("browser_debug_visible", False)))
                     self.log("Browser panel opened. Log in to Discord and open the robot control channel.")
                 except Exception as exc:
                     self.browser_panel = None
@@ -1799,7 +2078,50 @@ class QtApp:
         except Exception as exc:
             self.log(f"Could not retry Discord controls: {exc}")
 
+    def _set_browser_debug_visible(self, visible):
+        self.settings["browser_debug_visible"] = bool(visible)
+        self.cfg.set("settings", self.settings)
+        self.cfg.save()
+        if self.browser_panel is not None:
+            self.log("Restarting browser panel to apply debug window visibility.")
+            self._stop_direct_controller_session()
+            if self.settings.get("controller_enabled", False):
+                self._start_direct_controller_session()
+
+    def _update_browser_status(self):
+        if self.browser_status_action is None:
+            return
+        if self.browser_panel is None:
+            self.browser_status_action.setText("Browser: not running")
+            self.browser_status_action.setToolTip("")
+            return
+        status = self.browser_panel.status()
+        if not status.get("ready"):
+            detail = str(status.get("error", "starting"))
+            self.browser_status_action.setText(f"Browser: {detail}")
+            self.browser_status_action.setToolTip(detail)
+            return
+        panels = status.get("panels", {})
+        buttons = status.get("buttons", {})
+        main_buttons = ", ".join(buttons.get("main", []))
+        safe_buttons = ", ".join(buttons.get("safe", []))
+        detail = (
+            f"Window: {'visible' if status.get('visible') else 'hidden'}\n"
+            f"URL: {status.get('url', '')}\n"
+            f"Main panel: {'ready' if panels.get('main') else 'missing'}\n"
+            f"Safe panel: {'ready' if panels.get('safe') else 'missing'}\n"
+            f"Main buttons: {main_buttons or 'none'}\n"
+            f"Safe buttons: {safe_buttons or 'none'}"
+        )
+        self.browser_status_action.setText(
+            f"Browser: {'visible' if status.get('visible') else 'hidden'} · "
+            f"main {'ready' if panels.get('main') else 'missing'} · "
+            f"safe {'ready' if panels.get('safe') else 'missing'}")
+        self.browser_status_action.setToolTip(detail)
+
     def _configure_controller(self):
+        self._configure_controller_by_button()
+        return
         names = Controller.available()
         dialog = QtWidgets.QDialog(self.window)
         dialog.setWindowTitle("Controller mapping")
@@ -1813,15 +2135,6 @@ class QtApp:
         device.setCurrentIndex(min(self.controller.device_index, max(0, len(names) - 1)))
         layout.addWidget(QtWidgets.QLabel("Controller"))
         layout.addWidget(device)
-        mapping_scroll = QtWidgets.QScrollArea()
-        mapping_scroll.setWidgetResizable(True)
-        mapping_scroll.setMinimumHeight(260)
-        mapping_widget = QtWidgets.QWidget()
-        form = QtWidgets.QFormLayout(mapping_widget)
-        form.setVerticalSpacing(3)
-        form.setContentsMargins(4, 4, 4, 4)
-        mapping_scroll.setWidget(mapping_widget)
-        layout.addWidget(mapping_scroll, 1)
         mapping = dict(self.controller.mapping)
         mapping.setdefault(ANGLE_MODIFIER, 4)
         mapping.setdefault(VIEW_MODIFIER, 5)
@@ -1830,10 +2143,50 @@ class QtApp:
         selectors = {}
         binders = {}
         rows = {}
-        mapping_actions = (
-            CONTROLLER_ACTIONS + (ABORT_ACTION, VIEW_MODIFIER, ANGLE_MODIFIER)
-            + tuple(dict.fromkeys(VIEW_AXIS_ACTIONS + tuple(STICK_MAPPING_DEFAULTS)))
-        )
+        diagrams = []
+        mode_tabs = QtWidgets.QTabWidget()
+        mode_forms = {}
+        mode_actions = {
+            "Position": (
+                (
+                    "Position X+", "Position X-", "Position Y+", "Position Y-",
+                    "Position Z+", "Position Z-", "Step+", "Step-", ABORT_ACTION,
+                    ANGLE_MODIFIER, VIEW_MODIFIER,
+                ),
+            ),
+            "Angle": (
+                (
+                    "Angle Xa+", "Angle Xa-", "Angle Ya+", "Angle Ya-",
+                    "Angle Za+","Angle Za-",
+                ),
+            ),
+            "View": (
+                VIEW_AXIS_ACTIONS + VIEW_BUTTON_ACTIONS,
+            ),
+        }
+        modifier_tooltips = {
+            ANGLE_MODIFIER: "Hold this button while moving the sticks to control wrist angles Xa, Ya, and Za.",
+            VIEW_MODIFIER: "Hold this button while moving the sticks to orbit or pan the 3D view.",
+        }
+        for mode, actions in mode_actions.items():
+            page = QtWidgets.QWidget()
+            page_layout = QtWidgets.QHBoxLayout(page)
+            left = QtWidgets.QFormLayout()
+            right = QtWidgets.QFormLayout()
+            left.setVerticalSpacing(3)
+            right.setVerticalSpacing(3)
+            left_widget = QtWidgets.QWidget(); left_widget.setLayout(left)
+            right_widget = QtWidgets.QWidget(); right_widget.setLayout(right)
+            diagram = ControllerDiagram(names[device.currentIndex()] if names else "")
+            diagrams.append(diagram)
+            page_layout.addWidget(left_widget, 1)
+            page_layout.addWidget(diagram, 1)
+            page_layout.addWidget(right_widget, 1)
+            mode_tabs.addTab(page, mode)
+            mode_forms[mode] = (left, right)
+        layout.addWidget(mode_tabs, 1)
+        mapping_actions = tuple(dict.fromkeys(
+            action for actions in mode_actions.values() for action in actions[0]))
         invert_checks = {}
         view_invert = dict(self.cfg.get("controller_view_invert", {}))
         axis_invert = dict(self.cfg.get("controller_axis_invert", {}))
@@ -1844,13 +2197,23 @@ class QtApp:
         capture_status.setProperty("muted", True)
         layout.addWidget(capture_status)
 
+        def refresh_diagrams():
+            for diagram, actions in zip(diagrams, mode_actions.values()):
+                diagram.set_bindings(mapping, actions[0])
+
         def rebuild_buttons(index):
-            for row in rows.values():
-                form.removeRow(row)
+            for form, _ in mode_forms.values():
+                while form.rowCount():
+                    form.removeRow(0)
+            for _, row in rows.values():
+                row.deleteLater()
             selectors.clear()
             binders.clear()
             rows.clear()
             invert_checks.clear()
+            for diagram in diagrams:
+                diagram.set_controller_name(names[index] if index < len(names) else "")
+            refresh_diagrams()
             options = Controller.button_options(index)
             if not options:
                 options = [
@@ -1864,7 +2227,7 @@ class QtApp:
                 ]
             if not any(value is None for value, _ in options):
                 options.insert(0, (None, "Unassigned"))
-            for action in mapping_actions:
+            for action_index, action in enumerate(mapping_actions):
                 selector = QtWidgets.QComboBox()
                 for button, label in options:
                     selector.addItem(label, button)
@@ -1878,6 +2241,13 @@ class QtApp:
                 binder = QtWidgets.QPushButton("Bind")
                 binder.setMaximumWidth(52)
                 row_layout.addWidget(binder)
+                if action in modifier_tooltips:
+                    row.setStyleSheet(
+                        "QLabel { color: #8d929c; } "
+                        "QComboBox, QPushButton { color: #8d929c; }")
+                    row.setToolTip(modifier_tooltips[action])
+                    selector.setToolTip(modifier_tooltips[action])
+                    binder.setToolTip(f"Bind the modifier button. {modifier_tooltips[action]}")
                 if action in VIEW_AXIS_ACTIONS or action in (
                     "Position X+", "Position Y+", "Position Z+",
                     "Angle Xa+", "Angle Ya+", "Angle Za+",
@@ -1886,11 +2256,26 @@ class QtApp:
                     invert.setChecked(bool((view_invert if action in VIEW_AXIS_ACTIONS else axis_invert).get(action, False)))
                     row_layout.addWidget(invert)
                     invert_checks[action] = invert
-                form.addRow(action, row)
+                mode = next(mode for mode, actions in mode_actions.items()
+                            if action in actions[0])
+                left, right = mode_forms[mode]
+                form = left if action_index % 2 == 0 else right
+                if action in modifier_tooltips:
+                    action_label = QtWidgets.QLabel(action)
+                    action_label.setStyleSheet("color: #8d929c;")
+                    action_label.setToolTip(modifier_tooltips[action])
+                    form.addRow(action_label, row)
+                else:
+                    form.addRow(action, row)
                 selectors[action] = selector
                 binders[action] = binder
-                rows[action] = row
+                rows[action] = (left if action_index % 2 == 0 else right, row)
                 binder.clicked.connect(lambda checked=False, name=action: start_capture(name))
+                selector.currentIndexChanged.connect(
+                    lambda _, name=action, combo=selector: (
+                        mapping.__setitem__(name, combo.currentData()),
+                        refresh_diagrams(),
+                    ))
 
         def start_capture(action):
             capture_action[0] = action
@@ -1933,9 +2318,10 @@ class QtApp:
             capture_timer.stop()
             return
         capture_timer.stop()
-        saved_mapping = {
+        saved_mapping = dict(mapping)
+        saved_mapping.update({
             action: selector.currentData() for action, selector in selectors.items()
-        }
+        })
         axis_aliases = {
             "X+": "Position X+", "X-": "Position X-",
             "Y+": "Position Y+", "Y-": "Position Y-",
@@ -1946,7 +2332,8 @@ class QtApp:
         }
         for legacy_action, axis_action in axis_aliases.items():
             control = saved_mapping.get(legacy_action)
-            if isinstance(control, str) and control.startswith("axis"):
+            if (axis_action not in saved_mapping and
+                    isinstance(control, str) and control.startswith("axis")):
                 saved_mapping[axis_action] = control
         self.controller.mapping = saved_mapping
         self.controller.set_device(device.currentIndex())
@@ -1960,6 +2347,252 @@ class QtApp:
             action: check.isChecked() for action, check in invert_checks.items()
             if action not in VIEW_AXIS_ACTIONS
         })
+        self.cfg.save()
+        self.controller_enabled_action.setChecked(True)
+        self.log("Controller mapping saved.")
+
+    def _configure_controller_by_button(self):
+        names = Controller.available()
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle("Controller mapping")
+        dialog.resize(1600, 950)
+        dialog.setMinimumSize(1350, 820)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        device = QtWidgets.QComboBox()
+        device.addItems(names or ["No controller detected"])
+        device.setCurrentIndex(min(self.controller.device_index, max(0, len(names) - 1)))
+        layout.addWidget(QtWidgets.QLabel("Controller"))
+        layout.addWidget(device)
+
+        mode_actions = {
+            "Position": (
+                "Position X+", "Position X-", "Position Y+", "Position Y-",
+                "Position Z+", "Position Z-", "Step+", "Step-", ABORT_ACTION,
+                ANGLE_MODIFIER, VIEW_MODIFIER,
+            ),
+            "Angle": (
+                "Angle Xa+", "Angle Xa-", "Angle Ya+", "Angle Ya-",
+                "Angle Za+", "Angle Za-",
+            ),
+            "View": VIEW_AXIS_ACTIONS + VIEW_BUTTON_ACTIONS,
+        }
+        legacy = {
+            "Position X+": "X+", "Position X-": "X-",
+            "Position Y+": "Y+", "Position Y-": "Y-",
+            "Position Z+": "Z+", "Position Z-": "Z-",
+            "Angle Xa+": "Xa+", "Angle Xa-": "Xa-",
+            "Angle Ya+": "Ya+", "Angle Ya-": "Ya-",
+            "Angle Za+": "Za+", "Angle Za-": "Za-",
+        }
+        modifier_tooltips = {
+            ANGLE_MODIFIER: "Hold this button while moving the sticks to control wrist angles Xa, Ya, and Za.",
+            VIEW_MODIFIER: "Hold this button while moving the sticks to orbit or pan the 3D view.",
+        }
+        mapping = dict(self.controller.mapping)
+        view_invert = dict(self.cfg.get("controller_view_invert", {}))
+        axis_invert = dict(self.cfg.get("controller_axis_invert", {}))
+        tabs = QtWidgets.QTabWidget()
+        layout.addWidget(tabs, 1)
+        function_selectors = {}
+
+        def find_action(control, actions):
+            for action in actions:
+                controls = (control,)
+                if isinstance(control, str) and control.startswith("axis"):
+                    controls += (f"{control}:+", f"{control}:-")
+                elif control == "hat0:x":
+                    controls += ("hat0:left", "hat0:right")
+                elif control == "hat0:y":
+                    controls += ("hat0:up", "hat0:down")
+                if (mapping.get(action) in controls or
+                        mapping.get(legacy.get(action)) in controls):
+                    if (isinstance(control, str) and
+                            (control.startswith("axis") or control in ("hat0:x", "hat0:y")) and
+                            action.endswith(("+", "-"))):
+                        return action[:-1]
+                    return action
+            return None
+
+        def grouped_options(options, controller_name):
+            grouped = []
+            seen = set()
+            controller_lower = controller_name.lower()
+            playstation = any(token in controller_lower
+                              for token in ("playstation", "dualshock", "dualsense", "ps4", "ps5"))
+            for control, label in options:
+                if isinstance(control, str) and control.startswith("axis"):
+                    base = control.split(":", 1)[0]
+                    if base in seen:
+                        continue
+                    seen.add(base)
+                    axis_labels = {
+                        "axis0": "LX", "axis1": "LY", "axis2": "RX",
+                        "axis3": "RY", "axis4": "L2", "axis5": "R2",
+                    }
+                    if not playstation:
+                        axis_labels.update({"axis4": "LT", "axis5": "RT"})
+                    grouped.append((base, axis_labels.get(base, label.split(" ")[0])))
+                elif isinstance(control, str) and control.startswith("hat0:"):
+                    direction = control.removeprefix("hat0:")
+                    grouped.append((control, f"D-pad {direction.title()}"))
+                else:
+                    grouped.append((control, label))
+            return grouped
+
+        def function_choices(control, actions):
+            if isinstance(control, str) and (
+                    control.startswith("axis") or control in ("hat0:x", "hat0:y")):
+                pairs = []
+                for action in actions:
+                    if action.endswith(("+", "-")):
+                        base = action[:-1]
+                        if base not in pairs:
+                            pairs.append(base)
+                    else:
+                        pairs.append(action)
+                return pairs
+            return list(actions)
+
+        def action_label(action):
+            return action.removeprefix("Position ").removeprefix("Angle ")
+
+        def control_options(index):
+            options = Controller.button_options(index)
+            if options:
+                return [(control, label) for control, label in options if control is not None]
+            return (
+                [(button, f"Button {button}") for button in range(16)] +
+                [(f"hat0:{direction}", f"D-pad {label}")
+                 for direction, label in (("up", "Up"), ("down", "Down"),
+                                          ("left", "Left"), ("right", "Right"))] +
+                [(f"axis{axis}:{sign}", f"Axis {axis} {'+' if sign == '+' else '-'}")
+                 for axis in range(8) for sign in ("+", "-")]
+            )
+
+        def open_control_selector(mode, control):
+            selector = function_selectors.get((mode, control))
+            if selector is None:
+                return
+            tabs.setCurrentIndex(list(mode_actions).index(mode))
+            selector.setFocus()
+            selector.showPopup()
+
+        def rebuild(index):
+            while tabs.count():
+                tabs.removeTab(0)
+            function_selectors.clear()
+            controller_name = names[index] if index < len(names) else ""
+            options = grouped_options(control_options(index), controller_name)
+            for mode, actions in mode_actions.items():
+                page = QtWidgets.QWidget()
+                page_layout = QtWidgets.QHBoxLayout(page)
+                diagram = ControllerDiagram(names[index] if index < len(names) else "")
+                diagram.setMinimumSize(1250, 760)
+                diagram.set_bindings({}, ())
+                page_layout.addWidget(diagram, 1)
+                input_controls = []
+                for control, label in options:
+                    row = QtWidgets.QWidget()
+                    row_layout = QtWidgets.QHBoxLayout(row)
+                    row_layout.setContentsMargins(0, 0, 0, 0)
+                    functions = QtWidgets.QComboBox()
+                    functions.setMinimumWidth(165)
+                    functions.setSizeAdjustPolicy(
+                        QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+                    functions.setToolTip(f"Select the function for {label}.")
+                    functions.addItem("Unassigned", None)
+                    choices = function_choices(control, actions)
+                    for action in choices:
+                        functions.addItem(action_label(action), action)
+                    selected = find_action(control, actions)
+                    functions.setCurrentIndex(max(0, functions.findData(selected)))
+                    row_layout.addWidget(functions, 1)
+                    row.setMinimumWidth(230)
+                    if any(action in actions for action in (
+                            VIEW_AXIS_ACTIONS + ("Position X+", "Position Y+", "Position Z+",
+                                                  "Angle Xa+", "Angle Ya+", "Angle Za+"))):
+                        invert = QtWidgets.QCheckBox("Invert")
+                        selected_invert = (view_invert if selected in VIEW_AXIS_ACTIONS else axis_invert)
+                        invert.setChecked(bool(selected_invert.get(selected, False)))
+                        row_layout.addWidget(invert)
+
+                        def save_invert(_, combo=functions, check=invert):
+                            action = combo.currentData()
+                            if action:
+                                target = view_invert if action in VIEW_AXIS_ACTIONS else axis_invert
+                                target[action] = check.isChecked()
+
+                        invert.toggled.connect(save_invert)
+                    if selected in modifier_tooltips:
+                        row.setStyleSheet("QComboBox, QCheckBox { color: #8d929c; }")
+                        row.setToolTip(modifier_tooltips[selected])
+                        functions.setToolTip(modifier_tooltips[selected])
+                    def save_function(_, combo=functions, physical=control, action_set=actions):
+                        action = combo.currentData()
+                        axis_or_hat = (
+                            isinstance(physical, str) and physical.startswith("axis")
+                        ) or physical in ("hat0:x", "hat0:y")
+                        physical_controls = (physical,)
+                        if isinstance(physical, str) and physical.startswith("axis"):
+                            physical_controls += (f"{physical}:+", f"{physical}:-")
+                        elif physical == "hat0:x":
+                            physical_controls += ("hat0:left", "hat0:right")
+                        elif physical == "hat0:y":
+                            physical_controls += ("hat0:up", "hat0:down")
+                        for candidate in action_set:
+                            if (mapping.get(candidate) in physical_controls or
+                                    mapping.get(legacy.get(candidate)) in physical_controls):
+                                mapping[candidate] = None
+                            if legacy.get(candidate):
+                                mapping[legacy[candidate]] = None
+                        if action:
+                            if axis_or_hat and action.endswith(("+", "-")):
+                                action = action[:-1]
+                            positive = action + "+"
+                            negative = action + "-"
+                            paired = f"{action}+" in action_set or f"{action}-" in action_set
+                            if isinstance(physical, str) and physical.startswith("axis") and paired:
+                                mapping[positive] = f"{physical}:+"
+                                mapping[negative] = f"{physical}:-"
+                            elif physical == "hat0:x" and paired:
+                                mapping[positive] = "hat0:right"
+                                mapping[negative] = "hat0:left"
+                            elif physical == "hat0:y" and paired:
+                                mapping[positive] = "hat0:up"
+                                mapping[negative] = "hat0:down"
+                            elif isinstance(physical, str) and physical.startswith("axis"):
+                                mapping[action] = f"{physical}:+"
+                            else:
+                                mapping[action] = physical
+                    functions.currentIndexChanged.connect(save_function)
+                    row.setToolTip(label)
+                    function_selectors[(mode, control)] = functions
+                    input_controls.append((row, control))
+                diagram.set_input_controls(input_controls)
+                diagram.controlClicked.connect(
+                    lambda control, selected_mode=mode:
+                    open_control_selector(selected_mode, control))
+                tabs.addTab(page, mode)
+
+        device.currentIndexChanged.connect(lambda index: (
+            self.controller.set_device(index),
+            rebuild(index),
+        ))
+        rebuild(device.currentIndex())
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self.controller.mapping = mapping
+        self.controller.set_device(device.currentIndex())
+        self.cfg.set("controller_mapping", mapping)
+        self.cfg.set("controller_device", self.controller.device_index)
+        self.cfg.set("controller_view_invert", view_invert)
+        self.cfg.set("controller_axis_invert", axis_invert)
         self.cfg.save()
         self.controller_enabled_action.setChecked(True)
         self.log("Controller mapping saved.")
@@ -1991,10 +2624,14 @@ class QtApp:
         axis_count = len(self.controller.state().get("axes", []))
         for axis in range(axis_count):
             bar = QtWidgets.QProgressBar()
-            bar.setRange(-100, 100)
+            if axis >= TRIGGER_AXIS_START:
+                bar.setRange(0, 100)
+            else:
+                bar.setRange(-100, 100)
             bar.setValue(0)
             bar.setFormat("%v")
-            axes_layout.addRow(f"Axis {axis}", bar)
+            label = f"Trigger {axis}" if axis >= TRIGGER_AXIS_START else f"Axis {axis}"
+            axes_layout.addRow(label, bar)
             axis_bars.append(bar)
         layout.addWidget(axes_box)
         close = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
@@ -2851,6 +3488,9 @@ class QtApp:
         if axis >= 3: value = wrap180(value)
         self.relative_box.setChecked(False)
         field.setText(f"{value:.1f}")
+        if self.settings.get("controller_input_mode", "plan") == "plan":
+            self._plan_movement()
+            self._preview_target()
 
     def _preview_target(self, *_):
         target, _ = self._target_values()
@@ -3692,6 +4332,9 @@ class QtApp:
 
     def _tick(self):
         now = clock(); dt = min(0.1, now - self.last_tick); self.last_tick = now
+        if now - self._last_browser_status_time >= 0.5:
+            self._last_browser_status_time = now
+            self._update_browser_status()
         if self.settings.get("controller_enabled", False):
             controller_actions = self.controller.poll()
             for action, magnitude in controller_actions:

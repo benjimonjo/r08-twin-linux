@@ -20,6 +20,11 @@ VIEW_AXIS_ACTIONS = (
     "View orbit horizontal", "View orbit vertical",
     "View pan horizontal", "View pan vertical",
 )
+VIEW_BUTTON_ACTIONS = ("View zoom in", "View zoom out")
+VIEW_BUTTON_MAPPING_DEFAULTS = {
+    "View zoom in": "axis4:+",
+    "View zoom out": "axis5:+",
+}
 VIEW_MAPPING_DEFAULTS = {
     "View orbit horizontal": "axis0:+",
     "View orbit vertical": "axis1:+",
@@ -39,33 +44,24 @@ STICK_MAPPING_DEFAULTS = {
 MODIFIER_MAPPING_DEFAULTS = {ANGLE_MODIFIER: 4, CAMERA_MODIFIER: 5}
 DEFAULT_MAPPING = {action: index for index, action in enumerate(CONTROLLER_ACTIONS)}
 AXIS_DEADZONE = 0.55
+TRIGGER_AXIS_START = 4
 
 
 class Controller:
+    @staticmethod
+    def normalize_axis_value(axis, value):
+        """Normalize SDL trigger axes from -1..1 to 0..1."""
+        value = float(value)
+        if int(axis) >= TRIGGER_AXIS_START:
+            return max(0.0, min(1.0, (value + 1.0) / 2.0))
+        return max(-1.0, min(1.0, value))
+
     def __init__(self, mapping=None, device=0, repeat_delay=0.12):
         self.mapping = dict(DEFAULT_MAPPING)
         self.mapping.update(mapping or {})
-        old_axis_defaults = {
-            "Position X+": "axis0:+", "Position X-": "axis0:-",
-            "Position Y+": "axis1:-", "Position Y-": "axis1:+",
-            "Angle Xa+": "axis0:+", "Angle Xa-": "axis0:-",
-            "Angle Ya+": "axis1:-", "Angle Ya-": "axis1:+",
-        }
-        for action, old_control in old_axis_defaults.items():
-            if self.mapping.get(action) == old_control:
-                self.mapping[action] = STICK_MAPPING_DEFAULTS[action]
-        stale_x_pair = (
-            self.mapping.get("X+") == "axis1:-"
-            and self.mapping.get("X-") == "axis1:+"
-            and self.mapping.get("Position X+") == "axis1:-"
-            and self.mapping.get("Position X-") == "axis1:+"
-        )
-        if stale_x_pair:
-            self.mapping.update({
-                "X+": "axis1:+", "X-": "axis1:-",
-                "Position X+": "axis1:+", "Position X-": "axis1:-",
-            })
         for action, control in VIEW_MAPPING_DEFAULTS.items():
+            self.mapping.setdefault(action, control)
+        for action, control in VIEW_BUTTON_MAPPING_DEFAULTS.items():
             self.mapping.setdefault(action, control)
         for action, control in STICK_MAPPING_DEFAULTS.items():
             self.mapping.setdefault(action, control)
@@ -117,14 +113,14 @@ class Controller:
             lowered = name.lower()
             if any(token in lowered for token in ("dualshock", "dualsense", "playstation", "ps4", "ps5")):
                 labels = (
-                    "Cross", "Circle", "Square", "Triangle",
-                    "L1", "R1", "L2", "R2", "Share", "Options",
-                    "L3", "R3", "PS", "Touchpad",
+                    "Triangle", "Circle", "Cross", "Square",
+                    "L1", "R1", "L2", "R2", "Create", "Options",
+                    "L3 click", "R3 click", "PS", "Touchpad", "Mute",
                 )
             elif any(token in lowered for token in ("xbox", "x-input", "xinput")):
                 labels = (
-                    "A", "B", "X", "Y", "LB", "RB", "Back", "Start",
-                    "Guide", "LS", "RS",
+                    "X", "Y", "B", "A", "LB", "RB", "View", "Menu",
+                    "Xbox", "L3 click", "R3 click",
                 )
             elif any(token in lowered for token in ("switch", "nintendo", "joy-con", "pro controller")):
                 labels = ("B", "A", "Y", "X", "L", "R", "ZL", "ZR", "Minus", "Plus")
@@ -141,9 +137,10 @@ class Controller:
                 )
             ]
             axis_labels = (
-                "Left stick horizontal", "Left stick vertical",
-                "Right stick horizontal", "Right stick vertical",
-                "Axis 4", "Axis 5", "Axis 6", "Axis 7",
+                "LX", "LY", "RX", "RY",
+                "L2 axis" if "playstation" in lowered or "dual" in lowered or "ps" in lowered else "LT axis",
+                "R2 axis" if "playstation" in lowered or "dual" in lowered or "ps" in lowered else "RT axis",
+                "Trigger 6", "Trigger 7",
             )
             options.extend(
                 (f"axis{axis}:{sign}", f"{axis_labels[axis]} {'+' if sign == '+' else '-'}")
@@ -171,6 +168,102 @@ class Controller:
         self._next_button_repeat = 0.0
         self._open()
 
+    @staticmethod
+    def _runtime_action(action):
+        return {
+            "Position X+": "X+", "Position X-": "X-",
+            "Position Y+": "Y+", "Position Y-": "Y-",
+            "Position Z+": "Z+", "Position Z-": "Z-",
+            "Angle Xa+": "Xa+", "Angle Xa-": "Xa-",
+            "Angle Ya+": "Ya+", "Angle Ya-": "Ya-",
+            "Angle Za+": "Za+", "Angle Za-": "Za-",
+        }.get(action, action)
+
+    def _binding(self, action):
+        if action in self.mapping:
+            return self.mapping[action]
+        aliases = {
+            "Position X+": "X+", "Position X-": "X-",
+            "Position Y+": "Y+", "Position Y-": "Y-",
+            "Position Z+": "Z+", "Position Z-": "Z-",
+            "Angle Xa+": "Xa+", "Angle Xa-": "Xa-",
+            "Angle Ya+": "Ya+", "Angle Ya-": "Ya-",
+            "Angle Za+": "Za+", "Angle Za-": "Za-",
+        }
+        return self.mapping.get(aliases.get(action))
+
+    def _held(self, control):
+        if isinstance(control, int):
+            return control in self._held_buttons
+        if not isinstance(control, str):
+            return False
+        if control.startswith("hat0:"):
+            direction = control.removeprefix("hat0:")
+            return {
+                "left": self._hat_value[0] < 0, "right": self._hat_value[0] > 0,
+                "up": self._hat_value[1] > 0, "down": self._hat_value[1] < 0,
+            }.get(direction, False)
+        return False
+
+    def _active_bindings(self):
+        if self._held(self.mapping.get(CAMERA_MODIFIER)):
+            actions = VIEW_AXIS_ACTIONS
+        elif self._held(self.mapping.get(ANGLE_MODIFIER)):
+            actions = (
+                "Angle Xa+", "Angle Xa-", "Angle Ya+", "Angle Ya-",
+                "Angle Za+", "Angle Za-",
+            )
+        else:
+            actions = (
+                "Position X+", "Position X-", "Position Y+", "Position Y-",
+                "Position Z+", "Position Z-",
+            )
+        return {action: self._binding(action) for action in actions}
+
+    def _poll_buttons(self, bindings, pressed_buttons, now):
+        if now < self._next_button_repeat:
+            return []
+        actions = []
+        for action, control in bindings.items():
+            if self._held(control):
+                output = self._runtime_action(action)
+                if action in VIEW_AXIS_ACTIONS and self._held(self.mapping.get(CAMERA_MODIFIER)):
+                    output = f"{VIEW_MODIFIER}:{action}:+"
+                actions.append((output, 1.0))
+        for action in ("Step+", "Step-", ABORT_ACTION):
+            if self._held(self.mapping.get(action)):
+                actions.append((action, 1.0))
+        if self.mapping.get(ABORT_ACTION) in pressed_buttons:
+            actions.append((ABORT_ACTION, 1.0))
+        self._next_button_repeat = now + self.repeat_delay
+        return actions
+
+    def _poll_axes(self, bindings, camera_held):
+        actions = []
+        for action, control in bindings.items():
+            if not isinstance(control, str) or not control.startswith("axis"):
+                continue
+            try:
+                axis_text, sign = control.removeprefix("axis").split(":")
+                value = float(self._axis_values.get(int(axis_text), 0.0))
+            except (TypeError, ValueError):
+                continue
+            oriented = value if sign == "+" else -value
+            if camera_held:
+                active = abs(oriented) >= AXIS_DEADZONE
+            else:
+                active = oriented >= AXIS_DEADZONE
+            if not active:
+                continue
+            magnitude = (abs(oriented) if camera_held else oriented) - AXIS_DEADZONE
+            magnitude /= 1.0 - AXIS_DEADZONE
+            direction = "+" if oriented >= 0 else "-"
+            output = self._runtime_action(action)
+            if camera_held:
+                output = f"{VIEW_MODIFIER}:{action}:{direction}"
+            actions.append((output, max(0.0, min(1.0, magnitude))))
+        return actions
+
     def capture_control(self):
         """Return the next button, hat direction, or joystick direction pressed."""
         if pygame is None:
@@ -192,8 +285,12 @@ class Controller:
                         return "hat0:up"
                     if hat_y < 0:
                         return "hat0:down"
-                if event.type == pygame.JOYAXISMOTION and abs(event.value) >= AXIS_DEADZONE:
-                    return f"axis{event.axis}:{'+' if event.value > 0 else '-'}"
+                if event.type == pygame.JOYAXISMOTION:
+                    value = self.normalize_axis_value(event.axis, event.value)
+                    if value >= AXIS_DEADZONE:
+                        return f"axis{event.axis}:+"
+                    if event.axis < TRIGGER_AXIS_START and value <= -AXIS_DEADZONE:
+                        return f"axis{event.axis}:-"
         except Exception as exc:
             self.error = str(exc)
         return None
@@ -217,110 +314,35 @@ class Controller:
                 elif event.type == pygame.JOYHATMOTION and event.hat == 0:
                     self._hat_value = event.value
                 elif event.type == pygame.JOYAXISMOTION:
-                    self._axis_values[event.axis] = event.value
+                    self._axis_values[event.axis] = self.normalize_axis_value(
+                        event.axis, event.value)
             # Some SDL backends do not emit axis events until the window has
             # focus. Read the current state as well so jogging remains reliable.
             for axis in range(self.joystick.get_numaxes()):
-                self._axis_values[axis] = self.joystick.get_axis(axis)
+                self._axis_values[axis] = self.normalize_axis_value(
+                    axis, self.joystick.get_axis(axis))
+            if hasattr(self.joystick, "get_button"):
+                self._held_buttons = {
+                    button for button in range(self.joystick.get_numbuttons())
+                    if self.joystick.get_button(button)
+                }
+            if hasattr(self.joystick, "get_hat") and self.joystick.get_numhats():
+                self._hat_value = self.joystick.get_hat(0)
 
-            if now >= self._next_button_repeat:
-                for action, control in self.mapping.items():
-                    if control in self._held_buttons:
-                        out.append((action, 1.0))
-                    elif isinstance(control, str) and control.startswith("hat0:"):
-                        hat_x, hat_y = self._hat_value
-                        directions = {
-                            "left": hat_x < 0, "right": hat_x > 0,
-                            "up": hat_y > 0, "down": hat_y < 0,
-                        }
-                        if directions.get(control.removeprefix("hat0:"), False):
-                            out.append((action, 1.0))
-                self._next_button_repeat = now + self.repeat_delay
-
-            if self.mapping.get(ABORT_ACTION) in pressed_buttons:
-                out.append((ABORT_ACTION, 1.0))
-
-            def held(control):
-                if control in self._held_buttons:
-                    return True
-                if isinstance(control, str) and control.startswith("hat0:"):
-                    return {
-                        "left": self._hat_value[0] < 0, "right": self._hat_value[0] > 0,
-                        "up": self._hat_value[1] > 0, "down": self._hat_value[1] < 0,
-                    }.get(control.removeprefix("hat0:"), False)
-                return False
-
-            camera_held = held(self.mapping.get(CAMERA_MODIFIER))
-            angle_held = held(self.mapping.get(ANGLE_MODIFIER))
-            if camera_held:
-                mappings = {action: self.mapping.get(action) for action in (
-                    "View orbit horizontal", "View orbit vertical",
-                    "View pan horizontal", "View pan vertical",
-                )}
-            elif angle_held:
-                mappings = {action: self.mapping.get(action) for action in (
-                    "Angle Xa+", "Angle Xa-", "Angle Ya+", "Angle Ya-",
-                    "Angle Za+", "Angle Za-",
-                )}
-            else:
-                mappings = {action: self.mapping.get(action) for action in (
-                    "Position X+", "Position X-", "Position Y+", "Position Y-",
-                    "Position Z+", "Position Z-",
-                )}
-            legacy_actions = {
-                "Position X+": "X+", "Position X-": "X-",
-                "Position Y+": "Y+", "Position Y-": "Y-",
-                "Position Z+": "Z+", "Position Z-": "Z-",
-                "Angle Xa+": "Xa+", "Angle Xa-": "Xa-",
-                "Angle Ya+": "Ya+", "Angle Ya-": "Ya-",
-                "Angle Za+": "Za+", "Angle Za-": "Za-",
-            }
-            for action, legacy_action in legacy_actions.items():
-                if legacy_action in self.mapping and (
-                    action not in self.mapping
-                    or (
-                        self.mapping.get(action) == STICK_MAPPING_DEFAULTS.get(action)
-                        and self.mapping.get(legacy_action) != DEFAULT_MAPPING.get(legacy_action)
-                    )
-                ):
-                    mappings[action] = self.mapping[legacy_action]
-                elif (
-                    action in self.mapping
-                    and legacy_action in self.mapping
-                    and self.mapping.get(action) != STICK_MAPPING_DEFAULTS.get(action)
-                    and self.mapping.get(legacy_action) == DEFAULT_MAPPING.get(legacy_action)
-                ):
-                    mappings[action] = self.mapping[action]
-            for action, control in mappings.items():
-                if not (isinstance(control, str) and control.startswith("axis")):
-                    continue
-                try:
-                    axis, sign = control.removeprefix("axis").split(":")
-                    value = float(self._axis_values.get(int(axis), 0.0))
-                except (TypeError, ValueError):
-                    continue
-                if abs(value) < AXIS_DEADZONE:
-                    continue
-                oriented_value = value if sign == "+" else -value
-                if not camera_held and oriented_value < AXIS_DEADZONE:
-                    continue
-                direction = "+" if oriented_value > 0 else "-"
-                magnitude = (
-                    (abs(oriented_value) if camera_held else oriented_value) - AXIS_DEADZONE
-                ) / (1.0 - AXIS_DEADZONE)
-                if camera_held:
-                    output_action = f"{VIEW_MODIFIER}:{action}:{direction}"
-                else:
-                    output_action = action
-                output_action = {
-                    "Position X+": "X+", "Position X-": "X-",
-                    "Position Y+": "Y+", "Position Y-": "Y-",
-                    "Position Z+": "Z+", "Position Z-": "Z-",
-                    "Angle Xa+": "Xa+", "Angle Xa-": "Xa-",
-                    "Angle Ya+": "Ya+", "Angle Ya-": "Ya-",
-                    "Angle Za+": "Za+", "Angle Za-": "Za-",
-                }.get(output_action, output_action)
-                out.append((output_action, max(0.0, min(1.0, magnitude))))
+            bindings = self._active_bindings()
+            camera_held = self._held(self.mapping.get(CAMERA_MODIFIER))
+            out.extend(self._poll_buttons(bindings, pressed_buttons, now))
+            out.extend(self._poll_axes(bindings, camera_held))
+            for action in VIEW_BUTTON_ACTIONS:
+                control = self.mapping.get(action)
+                if isinstance(control, str) and control.startswith("axis"):
+                    try:
+                        axis_text, sign = control.removeprefix("axis").split(":")
+                        value = self._axis_values.get(int(axis_text), 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    if sign == "+" and value >= AXIS_DEADZONE:
+                        out.append((action, (value - AXIS_DEADZONE) / (1.0 - AXIS_DEADZONE)))
         except Exception as exc:
             self.error = str(exc)
         return out

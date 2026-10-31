@@ -115,10 +115,37 @@ Joystick axes are also available, and each mapping row has a **Bind** button:
 click it and press the desired controller button, D-pad direction, or move the
 desired joystick direction. Holding a mapped button or D-pad direction repeats
 the jog, while joystick movement is proportional to stick deflection.
+Trigger axes are normalized from 0% when released to 100% when fully pressed.
+By default, the left trigger zooms in and the right trigger zooms out; these
+bindings can be changed in the controller mapping dialog.
 The controller mapping follows the PS5/Xbox layout by default: the sticks jog
 position, holding the **Angle modifier** switches them to Xa/Ya/Za, and holding
 the **View modifier** switches them to 3D orbit/pan. All modifier buttons and
 stick axes can be remapped and the camera axes inverted independently.
+Bind **View zoom in** and **View zoom out** to controller buttons or D-pad
+directions to zoom the 3D view without using the mouse wheel.
+The mapping dialog separates Position, Angle, and View into panes. Each pane
+shows a controller diagram adapted to the detected PlayStation, Xbox,
+Nintendo, or generic controller type, with Bind controls for every action,
+including the Angle modifier and all Xa/Ya/Za directions. The editor is
+arranged by physical controller input: choose the function beside each
+button, trigger, D-pad direction, or axis.
+The function menus are overlaid next to their corresponding controller
+glyphs, so each physical input can be configured in place.
+The selectors follow the controller callouts: Share, Touchpad, Options, L2/R2,
+L1/R1, four D-pad directions, face buttons, LX/LY/RX/RY, and stick-click/PS
+controls are placed in their corresponding positions.
+The Xbox, PS5/DualSense, and PS4/DualShock diagrams use their matching
+controller artwork and callout layout.
+You can also click an input on the controller diagram to open its function
+selector, following the DS4Windows-style button-selection workflow.
+PlayStation devices use the bundled PS4 controller glyph, while Xbox devices
+use a matching Xbox-style diagram. Current bindings are shown around the
+corresponding controller buttons and update as you edit them.
+For direct Discord browser control, **Show browser window (debug)** is available
+in the Controller menu. The menu also reports whether the browser window is
+visible, whether the main and safe panels were found, and the visible button
+labels in each panel.
 **Controller input readout** shows every detected button, D-pad state, and
 joystick axis value live.
 The **Abort** action can also be assigned with **Bind**; it triggers once when
