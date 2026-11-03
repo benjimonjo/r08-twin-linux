@@ -257,6 +257,12 @@ def segment(gray):
         x, y, w, h, a = (int(v) for v in st[k])
         if a < amin or w > 0.9 * W or h > 0.97 * H:
             continue
+        # A captured table cell can retain a one-pixel vertical border after
+        # line removal. Do not let that border establish the glyph height.
+        if x <= 0.05 * W and w <= 0.08 * W and h > 0.4 * H:
+            continue
+        if x + w >= 0.95 * W and w <= 0.08 * W and h > 0.4 * H:
+            continue
         comps.append({"x": x, "y": y, "w": w, "h": h, "ids": [k]})
     if not comps:
         return None
